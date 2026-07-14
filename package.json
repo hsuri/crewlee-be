@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "description": "Crewlee API — Python/FastAPI backend",
   "scripts": {
-    "dev": "docker compose up --build",
-    "start": "docker compose up -d --build",
+    "dev": "docker compose up --quiet-pull",
+    "build": "docker compose build --quiet",
+    "start": "docker compose up -d --quiet-pull",
     "stop": "docker compose down",
     "logs": "docker compose logs -f api"
   }
