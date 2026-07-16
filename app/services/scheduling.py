@@ -131,12 +131,14 @@ async def release_shift_if_no_live_swaps(connection, shift_id: int) -> None:
 
 async def serialize_shift(pool, shift) -> dict:
     row = await pool.fetchrow(
-        """SELECT s.*, u.name AS employee_name FROM shifts s
-           LEFT JOIN users u ON u.id = s.employee_id WHERE s.id = $1""", shift["id"]
+        """SELECT s.*, u.name AS employee_name, d.name AS department_name FROM shifts s
+           LEFT JOIN users u ON u.id = s.employee_id
+           LEFT JOIN departments d ON d.id = s.department_id WHERE s.id = $1""", shift["id"]
     )
     return {
         "id": row["id"], "restoId": row["resto_id"], "employeeId": row["employee_id"],
         "employeeName": row["employee_name"], "roleRequired": row["role_required"],
+        "departmentId": row["department_id"], "departmentName": row["department_name"],
         "date": row["shift_date"].isoformat(), "startTime": row["start_time"].isoformat(timespec="minutes"),
-        "endTime": row["end_time"].isoformat(timespec="minutes"), "status": row["status"],
+        "endTime": row["end_time"].isoformat(timespec="minutes"), "status": row["status"], "isDraft": row["is_draft"],
     }

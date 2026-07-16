@@ -4,14 +4,22 @@ Backend for Crewlee, a restaurant operations platform. FastAPI + asyncpg + Postg
 
 ## Architecture
 
-Two files carry the application:
+Standard FastAPI package layout under `app/`:
 
-- **`main.py`** — the FastAPI app: DB pool lifecycle, CORS, auth, Pydantic request models, and every route.
-- **`scheduling_service.py`** — pure business-rule module for scheduling: date/time parsing, availability/overtime/rest-period validation, and shift serialization. It exists so that every code path that can change a shift's assignment (manual create, drag-and-drop edit, auto-build, swap claim, swap approval) runs through the *same* `validate_assignment` check. If you add a new way to assign a shift to an employee, route it through `validate_assignment` rather than re-deriving the rules — that's the whole reason this module is split out.
+- **`app/main.py`** — app factory: DB pool lifecycle (`lifespan`), CORS, and `include_router` wiring for every router in `app/api/routes/`.
+- **`app/api/routes/`** — one router module per resource: `health.py`, `public_config.py`, `waitlist.py` (waitlist signups + admin login/list), `auth.py` (staff login + `/api/me`), `scheduling.py` (everything under `/api/scheduling/*`, still the bulk of the route count — it's one cohesive domain, not a sign it needs re-splitting).
+- **`app/models/schemas.py`** — every Pydantic request model, used across routers.
+- **`app/services/scheduling.py`** (formerly `scheduling_service.py`) — pure business-rule module for scheduling: date/time parsing, availability/overtime/rest-period validation, and shift serialization. It exists so that every code path that can change a shift's assignment (manual create, drag-and-drop edit, auto-build, swap claim, swap approval) runs through the *same* `validate_assignment` check. If you add a new way to assign a shift to an employee, route it through `validate_assignment` rather than re-deriving the rules — that's the whole reason this module is split out.
+- **`app/core/config.py`** — project + GCP/deploy constants (`DB_FIELDS`, `PROJECT_NAME`, `GCP_PROJECT_ID`, etc). `scripts/setup.sh`/`scripts/deploy.sh` read these via `python3 -c "from app.core import config; ..."`, so keep it import-safe (no side effects at module scope).
+- **`app/core/security.py`** — `require_auth`/`require_user` FastAPI dependencies, prototype bearer-token encode/decode, and bcrypt hash/verify helpers.
+- **`app/db/session.py`** — pool creation (`create_pool`) and idempotent schema bootstrap (`init_db`). Holds the pool as a module-level attribute, `db.pool` — code reads it via `from app.db import session as db; db.pool`, never `from app.db.session import pool` (that would bind at import time, before `lifespan` sets it, and stay `None` forever).
+- **`app/db/seed.py`** — demo restaurant/users seeding (`DEMO_USERS`, `seed_demo_data`), run from `lifespan` on an empty `users` table.
 
-**No migration framework.** `db/schema.sql` is executed verbatim on every process boot (`_init_db`, called from the FastAPI `lifespan` context in `main.py`). Every statement in it must stay idempotent — `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. This is how dev/demo databases stay in sync without Alembic or similar; if you add a column, add it as an idempotent `ALTER` at the bottom of the relevant block, don't rewrite the `CREATE TABLE`.
+Entrypoint is `app.main:app` (see `Dockerfile` / `scripts/dev.sh`), run from the repo root so `db/schema.sql` (still a top-level directory, not under `app/`) resolves correctly relative to `app/db/session.py`.
 
-If the DB is unreachable at startup, the app still boots (`lifespan` swallows the exception) — required for Cloud Run, which kills a revision that doesn't bind to `$PORT` in time. Routes that need `_pool` will 503 individually instead.
+**No migration framework.** `db/schema.sql` is executed verbatim on every process boot (`init_db`, called from the FastAPI `lifespan` context in `app/main.py`). Every statement in it must stay idempotent — `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. This is how dev/demo databases stay in sync without Alembic or similar; if you add a column, add it as an idempotent `ALTER` at the bottom of the relevant block, don't rewrite the `CREATE TABLE`.
+
+If the DB is unreachable at startup, the app still boots (`lifespan` swallows the exception) — required for Cloud Run, which kills a revision that doesn't bind to `$PORT` in time. Routes that need `db.pool` will 503 individually instead.
 
 ## Data model
 
@@ -24,9 +32,9 @@ If the DB is unreachable at startup, the app still boots (`lifespan` swallows th
 
 ## Auth
 
-`require_user` decodes an **unsigned base64-encoded user id** as the bearer token (`_make_token`/`_decode_token`, `main.py`). This is explicitly a prototype scheme — not signed, not expiring, trivially forgeable by anyone who can guess/enumerate a user id. It is fine for the current demo-only deployment and must not be treated as a real session mechanism if this app ever handles real credentials or real restaurant data — replace with signed JWTs or server-side sessions first. Admin auth (`require_auth`, gates `GET /api/waitlist`) is separately just the raw `ADMIN_PASSWORD` env var used as a bearer token — same caveat.
+`require_user` decodes an **unsigned base64-encoded user id** as the bearer token (`make_token`/`decode_token`, `app/core/security.py`). This is explicitly a prototype scheme — not signed, not expiring, trivially forgeable by anyone who can guess/enumerate a user id. It is fine for the current demo-only deployment and must not be treated as a real session mechanism if this app ever handles real credentials or real restaurant data — replace with signed JWTs or server-side sessions first. Admin auth (`require_auth`, gates `GET /api/waitlist`) is separately just the raw `ADMIN_PASSWORD` env var used as a bearer token — same caveat.
 
-## Scheduling business rules (`scheduling_service.py`)
+## Scheduling business rules (`app/services/scheduling.py`)
 
 All enforced inside `validate_assignment`, called by every assignment path:
 
@@ -47,7 +55,7 @@ All enforced inside `validate_assignment`, called by every assignment path:
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env.local   # already present in a working checkout
-.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 or via Docker: `npm run dev` (`docker compose up`) — API on `:8001`, Postgres 15 on `:5432` (`postgres`/`postgres`/`crewlee`).
 
