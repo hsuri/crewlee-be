@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import datetime
 from contextlib import asynccontextmanager
@@ -12,6 +13,9 @@ from fastapi import FastAPI, HTTPException, Header, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from scheduling_service import (
+    parse_date, parse_time, release_shift_if_no_live_swaps, serialize_shift, validate_assignment, week_start,
+)
 
 import config as cfg
 
@@ -78,12 +82,32 @@ async def _init_db(pool: asyncpg.Pool) -> None:
 DEMO_USERS = [
     {"name": "Morgan Manager", "email": "manager@demo.com", "password": "password123", "role": "manager"},
     {"name": "Frankie FOH", "email": "foh@demo.com", "password": "password123", "role": "foh"},
+    {"name": "Jordan FOH", "email": "jordan@demo.com", "password": "password123", "role": "foh"},
+    {"name": "Taylor FOH", "email": "taylor@demo.com", "password": "password123", "role": "foh"},
     {"name": "Bailey BOH", "email": "boh@demo.com", "password": "password123", "role": "boh"},
+    {"name": "Alex BOH", "email": "alex@demo.com", "password": "password123", "role": "boh"},
 ]
 
 
 async def _seed_demo_data(pool: asyncpg.Pool) -> None:
     if await pool.fetchval("SELECT count(*) FROM users"):
+        # Existing demo databases predate scheduling profiles; keep the visible
+        # demo usable without changing availability for real customer accounts.
+        await pool.execute(
+            """UPDATE users SET weekly_availability = $1::jsonb
+               WHERE email LIKE '%@demo.com' AND weekly_availability = '[]'::jsonb""",
+            '{"monday":[{"start":"00:00","end":"23:59"}],"tuesday":[{"start":"00:00","end":"23:59"}],"wednesday":[{"start":"00:00","end":"23:59"}],"thursday":[{"start":"00:00","end":"23:59"}],"friday":[{"start":"00:00","end":"23:59"}],"saturday":[{"start":"00:00","end":"23:59"}],"sunday":[{"start":"00:00","end":"23:59"}]}'
+        )
+        demo_restaurant = await pool.fetchval("SELECT id FROM restaurants WHERE name = 'Demo Restaurant'")
+        if demo_restaurant:
+            for demo_user in DEMO_USERS:
+                role_id = await pool.fetchval("SELECT id FROM roles WHERE name = $1", demo_user["role"])
+                await pool.execute(
+                    """INSERT INTO users (restaurant_id, role_id, name, email, password_hash, weekly_availability)
+                       VALUES ($1, $2, $3, $4, $5, $6::jsonb) ON CONFLICT (email) DO NOTHING""",
+                    demo_restaurant, role_id, demo_user["name"], demo_user["email"], _hash_password(demo_user["password"]),
+                    '{"monday":[{"start":"00:00","end":"23:59"}],"tuesday":[{"start":"00:00","end":"23:59"}],"wednesday":[{"start":"00:00","end":"23:59"}],"thursday":[{"start":"00:00","end":"23:59"}],"friday":[{"start":"00:00","end":"23:59"}],"saturday":[{"start":"00:00","end":"23:59"}],"sunday":[{"start":"00:00","end":"23:59"}]}'
+                )
         return
 
     restaurant_id = await pool.fetchval(
@@ -92,9 +116,10 @@ async def _seed_demo_data(pool: asyncpg.Pool) -> None:
     for u in DEMO_USERS:
         role_id = await pool.fetchval("SELECT id FROM roles WHERE name = $1", u["role"])
         await pool.execute(
-            "INSERT INTO users (restaurant_id, role_id, name, email, password_hash) "
-            "VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO users (restaurant_id, role_id, name, email, password_hash, weekly_availability) "
+            "VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
             restaurant_id, role_id, u["name"], u["email"], _hash_password(u["password"]),
+            '{"monday":[{"start":"00:00","end":"23:59"}],"tuesday":[{"start":"00:00","end":"23:59"}],"wednesday":[{"start":"00:00","end":"23:59"}],"thursday":[{"start":"00:00","end":"23:59"}],"friday":[{"start":"00:00","end":"23:59"}],"saturday":[{"start":"00:00","end":"23:59"}],"sunday":[{"start":"00:00","end":"23:59"}]}'
         )
     print("[db] Seeded demo restaurant + 3 dummy users (manager/foh/boh)")
 
@@ -130,7 +155,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -201,6 +226,33 @@ class LoginRequest(BaseModel):
 class UserLoginRequest(BaseModel):
     email: str
     password: str
+
+
+class AutoBuildRequest(BaseModel):
+    weekStart: str
+
+
+class ShiftUpdateRequest(BaseModel):
+    employeeId: Optional[int] = None
+    date: str
+    startTime: str
+    endTime: str
+
+
+class ShiftCreateRequest(BaseModel):
+    roleRequired: str
+    date: str
+    startTime: str
+    endTime: str
+    employeeId: Optional[int] = None
+
+
+class AvailabilityRequest(BaseModel):
+    weeklyAvailability: dict
+
+
+class SwapDecisionRequest(BaseModel):
+    approve: bool
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -299,6 +351,225 @@ async def user_login(creds: UserLoginRequest):
 @app.get("/api/me")
 async def me(user: dict = Depends(require_user)):
     return user
+
+
+# ── Scheduling ───────────────────────────────────────────────────────────────
+
+async def _restaurant_id_for(user_id: int) -> int:
+    if not _pool:
+        raise HTTPException(503, detail="Database unavailable")
+    restaurant_id = await _pool.fetchval("SELECT restaurant_id FROM users WHERE id = $1", user_id)
+    if not restaurant_id:
+        raise HTTPException(404, detail="Restaurant membership not found")
+    return restaurant_id
+
+
+@app.get("/api/scheduling/shifts")
+async def list_shifts(weekStart: Optional[str] = None, user: dict = Depends(require_user)):
+    restaurant_id = await _restaurant_id_for(user["id"])
+    is_manager = user["role"] == "manager"
+    if weekStart:
+        monday = week_start(parse_date(weekStart))
+        query = "SELECT id FROM shifts WHERE resto_id = $1 AND shift_date BETWEEN $2 AND $3" + (
+            "" if is_manager else " AND employee_id = $4"
+        )
+        args = (restaurant_id, monday, monday + datetime.timedelta(days=6)) + (() if is_manager else (user["id"],))
+    else:
+        query = "SELECT id FROM shifts WHERE resto_id = $1" + ("" if is_manager else " AND employee_id = $2")
+        args = (restaurant_id,) + (() if is_manager else (user["id"],))
+    query += " ORDER BY shift_date, start_time"
+    rows = await _pool.fetch(query, *args)
+    return [await serialize_shift(_pool, row) for row in rows]
+
+
+@app.get("/api/scheduling/employees")
+async def scheduling_employees(user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can view the team roster")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    rows = await _pool.fetch("SELECT u.id, u.name, r.name AS role FROM users u JOIN roles r ON r.id = u.role_id WHERE u.restaurant_id = $1 AND r.name IN ('foh', 'boh') ORDER BY u.name", restaurant_id)
+    return [{"id": row["id"], "name": row["name"], "role": row["role"]} for row in rows]
+
+
+@app.post("/api/scheduling/shifts")
+async def create_shift(payload: ShiftCreateRequest, user: dict = Depends(require_user)):
+    """Create an open shift or validate and publish an assigned one."""
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can create shifts")
+    if payload.roleRequired not in ("foh", "boh"):
+        raise HTTPException(422, detail="roleRequired must be FOH or BOH")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    shift_date, start_time, end_time = parse_date(payload.date), parse_time(payload.startTime), parse_time(payload.endTime)
+    if payload.employeeId is not None:
+        await validate_assignment(_pool, resto_id=restaurant_id, employee_id=payload.employeeId,
+            role_required=payload.roleRequired, shift_date=shift_date, start_time=start_time, end_time=end_time)
+    row = await _pool.fetchrow(
+        """INSERT INTO shifts (resto_id, employee_id, role_required, shift_date, start_time, end_time, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id""",
+        restaurant_id, payload.employeeId, payload.roleRequired, shift_date, start_time, end_time,
+        "Scheduled" if payload.employeeId is not None else "Open",
+    )
+    return await serialize_shift(_pool, row)
+
+
+@app.get("/api/scheduling/availability")
+async def get_availability(user: dict = Depends(require_user)):
+    availability = await _pool.fetchval("SELECT weekly_availability FROM users WHERE id = $1", user["id"])
+    if isinstance(availability, str):
+        availability = json.loads(availability)
+    return {"weeklyAvailability": availability or {}}
+
+
+@app.patch("/api/scheduling/availability")
+async def update_availability(payload: AvailabilityRequest, user: dict = Depends(require_user)):
+    valid_days = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+    if any(day.lower() not in valid_days for day in payload.weeklyAvailability):
+        raise HTTPException(422, detail="Availability must be grouped by day of the week")
+    for day, windows in payload.weeklyAvailability.items():
+        if not isinstance(windows, list):
+            raise HTTPException(422, detail=f"Availability for {day} must be a list of time windows")
+        for window in windows:
+            try:
+                if parse_time(window["start"]) >= parse_time(window["end"]):
+                    raise HTTPException(422, detail=f"Availability for {day} must end after it starts")
+            except (KeyError, TypeError):
+                raise HTTPException(422, detail=f"Availability for {day} needs start and end times")
+    await _pool.execute("UPDATE users SET weekly_availability = $1::jsonb WHERE id = $2", json.dumps(payload.weeklyAvailability), user["id"])
+    return {"weeklyAvailability": payload.weeklyAvailability}
+
+
+@app.post("/api/scheduling/auto-build")
+async def auto_build_schedule(payload: AutoBuildRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can auto-build schedules")
+    restaurant_id, monday = await _restaurant_id_for(user["id"]), week_start(parse_date(payload.weekStart))
+    open_shifts = await _pool.fetch("SELECT * FROM shifts WHERE resto_id = $1 AND shift_date BETWEEN $2 AND $3 AND employee_id IS NULL AND status = 'Open' ORDER BY shift_date, start_time", restaurant_id, monday, monday + datetime.timedelta(days=6))
+    assignments, unfilled = [], []
+    for shift in open_shifts:
+        candidates = await _pool.fetch("SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id WHERE u.restaurant_id = $1 AND r.name = $2 ORDER BY u.id", restaurant_id, shift["role_required"])
+        chosen = None
+        for candidate in candidates:
+            try:
+                await validate_assignment(_pool, resto_id=restaurant_id, employee_id=candidate["id"], role_required=shift["role_required"], shift_date=shift["shift_date"], start_time=shift["start_time"], end_time=shift["end_time"])
+                chosen = candidate["id"]
+                break
+            except HTTPException:
+                continue
+        if chosen:
+            row = await _pool.fetchrow("UPDATE shifts SET employee_id = $1, status = 'Scheduled' WHERE id = $2 RETURNING id", chosen, shift["id"])
+            assignments.append(await serialize_shift(_pool, row))
+        else:
+            unfilled.append(shift["id"])
+    return {"assigned": assignments, "unfilledShiftIds": unfilled}
+
+
+@app.patch("/api/scheduling/shifts/{shift_id}")
+async def update_shift(shift_id: int, payload: ShiftUpdateRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can edit shifts")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    current = await _pool.fetchrow("SELECT * FROM shifts WHERE id = $1 AND resto_id = $2", shift_id, restaurant_id)
+    if not current:
+        raise HTTPException(404, detail="Shift not found")
+    shift_date, start_time, end_time = parse_date(payload.date), parse_time(payload.startTime), parse_time(payload.endTime)
+    if payload.employeeId is not None:
+        await validate_assignment(_pool, resto_id=restaurant_id, employee_id=payload.employeeId, role_required=current["role_required"], shift_date=shift_date, start_time=start_time, end_time=end_time, exclude_shift_id=shift_id)
+    row = await _pool.fetchrow("UPDATE shifts SET employee_id = $1, shift_date = $2, start_time = $3, end_time = $4, status = CASE WHEN $1 IS NULL THEN 'Open' ELSE 'Scheduled' END WHERE id = $5 RETURNING id", payload.employeeId, shift_date, start_time, end_time, shift_id)
+    return await serialize_shift(_pool, row)
+
+
+@app.post("/api/scheduling/drop-shift")
+async def drop_shift(shiftId: int, user: dict = Depends(require_user)):
+    restaurant_id = await _restaurant_id_for(user["id"])
+    shift = await _pool.fetchrow("SELECT * FROM shifts WHERE id = $1 AND resto_id = $2 AND employee_id = $3", shiftId, restaurant_id, user["id"])
+    if not shift:
+        raise HTTPException(404, detail="Assigned shift not found")
+    if shift["status"] == "Pending_Swap":
+        raise HTTPException(409, detail="This shift is already in the swap queue")
+    candidates = await _pool.fetch("SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id WHERE u.restaurant_id = $1 AND r.name = $2 AND u.id <> $3", restaurant_id, shift["role_required"], user["id"])
+    eligible = []
+    for candidate in candidates:
+        try:
+            await validate_assignment(_pool, resto_id=restaurant_id, employee_id=candidate["id"], role_required=shift["role_required"], shift_date=shift["shift_date"], start_time=shift["start_time"], end_time=shift["end_time"], exclude_shift_id=shiftId)
+        except HTTPException:
+            continue
+        eligible.append(candidate["id"])
+    if not eligible:
+        return {"shiftId": shiftId, "status": "Scheduled", "matches": []}
+    matches = []
+    async with _pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute("UPDATE shifts SET status = 'Pending_Swap' WHERE id = $1", shiftId)
+            for employee_id in eligible:
+                request = await connection.fetchrow("INSERT INTO swap_requests (resto_id, original_shift_id, requesting_employee_id, target_employee_id, status) VALUES ($1, $2, $3, $4, 'Pending_Match') ON CONFLICT (original_shift_id, target_employee_id) DO UPDATE SET status = 'Pending_Match' RETURNING id", restaurant_id, shiftId, user["id"], employee_id)
+                matches.append({"swapRequestId": request["id"], "employeeId": employee_id})
+    return {"shiftId": shiftId, "status": "Pending_Swap", "matches": matches}
+
+
+@app.get("/api/scheduling/eligible-shifts")
+async def eligible_shifts(user: dict = Depends(require_user)):
+    rows = await _pool.fetch("SELECT sr.id AS swap_request_id, s.id FROM swap_requests sr JOIN shifts s ON s.id = sr.original_shift_id WHERE sr.target_employee_id = $1 AND sr.status = 'Pending_Match' AND s.status = 'Pending_Swap' ORDER BY s.shift_date, s.start_time", user["id"])
+    result = []
+    for row in rows:
+        shift = await serialize_shift(_pool, row)
+        shift["swapRequestId"] = row["swap_request_id"]
+        result.append(shift)
+    return result
+
+
+@app.post("/api/scheduling/swap-requests/{request_id}/claim")
+async def claim_swap(request_id: int, user: dict = Depends(require_user)):
+    """A qualified employee explicitly claims a marketplace shift for manager approval."""
+    async with _pool.acquire() as connection:
+        async with connection.transaction():
+            request = await connection.fetchrow(
+                "SELECT * FROM swap_requests WHERE id = $1 AND target_employee_id = $2 FOR UPDATE",
+                request_id, user["id"],
+            )
+            if not request or request["status"] != "Pending_Match":
+                raise HTTPException(404, detail="Eligible shift is no longer available")
+            shift = await connection.fetchrow(
+                "SELECT * FROM shifts WHERE id = $1 AND status = 'Pending_Swap' FOR UPDATE",
+                request["original_shift_id"],
+            )
+            if not shift:
+                raise HTTPException(409, detail="This shift is no longer available")
+            # Recheck at claim time: availability or weekly hours may have changed.
+            await validate_assignment(connection, resto_id=request["resto_id"], employee_id=user["id"], role_required=shift["role_required"], shift_date=shift["shift_date"], start_time=shift["start_time"], end_time=shift["end_time"], exclude_shift_id=shift["id"])
+            await connection.execute("UPDATE swap_requests SET status = CASE WHEN id = $1 THEN 'Pending_Approval' ELSE 'Rejected' END WHERE original_shift_id = $2 AND status = 'Pending_Match'", request_id, shift["id"])
+    return {"id": request_id, "status": "Pending_Approval"}
+
+
+@app.get("/api/scheduling/swap-requests")
+async def swap_requests(user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can view the approval queue")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    rows = await _pool.fetch("SELECT sr.id, sr.status, s.id AS shift_id, s.shift_date, s.start_time, s.end_time, requester.name AS requesting_name, target.name AS target_name FROM swap_requests sr JOIN shifts s ON s.id = sr.original_shift_id JOIN users requester ON requester.id = sr.requesting_employee_id LEFT JOIN users target ON target.id = sr.target_employee_id WHERE sr.resto_id = $1 AND sr.status = 'Pending_Approval' ORDER BY sr.created_at DESC", restaurant_id)
+    return [{"id": r["id"], "status": r["status"], "shiftId": r["shift_id"], "date": r["shift_date"].isoformat(), "startTime": r["start_time"].isoformat(timespec="minutes"), "endTime": r["end_time"].isoformat(timespec="minutes"), "requestingEmployeeName": r["requesting_name"], "targetEmployeeName": r["target_name"]} for r in rows]
+
+
+@app.post("/api/scheduling/swap-requests/{request_id}/decision")
+async def decide_swap(request_id: int, payload: SwapDecisionRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can decide swaps")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    request = await _pool.fetchrow("SELECT * FROM swap_requests WHERE id = $1 AND resto_id = $2", request_id, restaurant_id)
+    if not request or request["status"] != "Pending_Approval":
+        raise HTTPException(404, detail="Active swap request not found")
+    if not payload.approve:
+        async with _pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("UPDATE swap_requests SET status = 'Rejected' WHERE id = $1", request_id)
+                await release_shift_if_no_live_swaps(connection, request["original_shift_id"])
+        return {"id": request_id, "status": "Rejected"}
+    shift = await _pool.fetchrow("SELECT * FROM shifts WHERE id = $1", request["original_shift_id"])
+    await validate_assignment(_pool, resto_id=restaurant_id, employee_id=request["target_employee_id"], role_required=shift["role_required"], shift_date=shift["shift_date"], start_time=shift["start_time"], end_time=shift["end_time"], exclude_shift_id=shift["id"])
+    async with _pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute("UPDATE shifts SET employee_id = $1, status = 'Scheduled' WHERE id = $2", request["target_employee_id"], shift["id"])
+            await connection.execute("UPDATE swap_requests SET status = CASE WHEN id = $1 THEN 'Completed' ELSE 'Rejected' END WHERE original_shift_id = $2 AND status = 'Pending_Approval'", request_id, shift["id"])
+    return {"id": request_id, "status": "Completed"}
 
 
 @app.get("/api/waitlist")
