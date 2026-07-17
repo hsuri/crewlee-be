@@ -25,9 +25,9 @@ Schema lives in [`db/schema.sql`](db/schema.sql) and runs automatically on start
 - **`restaurants`** — id, name
 - **`roles`** — id, name — seeded with `manager`, `foh`, `boh`
 - **`users`** — restaurant staff: name, email, password_hash, `restaurant_id` → restaurants, `role_id` → roles
-- **`waitlist`** — pre-launch signups (schema driven by `config.py`'s `DB_FIELDS`, separate from the tables above)
+- **`waitlist`** — pre-launch signups (schema driven by `app/core/config.py`'s `DB_FIELDS`, separate from the tables above)
 
-On first boot with an empty `users` table, a demo restaurant and one dummy user per role are seeded automatically (see `DEMO_USERS` in `main.py`):
+On first boot with an empty `users` table, a demo restaurant and one dummy user per role are seeded automatically (see `DEMO_USERS` in `app/db/seed.py`):
 
 | Email | Password | Role |
 |---|---|---|

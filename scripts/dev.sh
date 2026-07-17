@@ -27,4 +27,4 @@ echo "[dev] DB: ${DATABASE_URL:-not set}"
 echo "[dev] CORS: ${ALLOWED_ORIGINS:-http://localhost:3000}"
 echo ""
 
-exec uvicorn main:app --reload --host 0.0.0.0 --port "$PORT"
+exec uvicorn app.main:app --reload --host 0.0.0.0 --port "$PORT"

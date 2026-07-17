@@ -17,9 +17,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PROJECT_ID=$(python3 -c "import config; print(config.GCP_PROJECT_ID)")
-REGION=$(python3    -c "import config; print(config.GCP_REGION)")
-SERVICE_NAME=$(python3 -c "import config; print(config.SERVICE_NAME)")
+PROJECT_ID=$(python3 -c "from app.core import config; print(config.GCP_PROJECT_ID)")
+REGION=$(python3    -c "from app.core import config; print(config.GCP_REGION)")
+SERVICE_NAME=$(python3 -c "from app.core import config; print(config.SERVICE_NAME)")
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
