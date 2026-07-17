@@ -164,3 +164,28 @@ CREATE TABLE IF NOT EXISTS schedule_templates (
 );
 
 CREATE INDEX IF NOT EXISTS schedule_templates_resto_idx ON schedule_templates (resto_id);
+
+CREATE TABLE IF NOT EXISTS announcements (
+    id         SERIAL PRIMARY KEY,
+    resto_id   integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+    author_id  integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title      text NOT NULL,
+    body       text NOT NULL,
+    pinned     boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS announcements_resto_idx ON announcements (resto_id, pinned DESC, created_at DESC);
+
+-- One row per employee who has explicitly confirmed reading an announcement -- the read
+-- receipt. UNIQUE means a second "mark as read" call is a harmless no-op (ON CONFLICT DO
+-- NOTHING), so read_at always reflects the first confirmation, not the latest click.
+CREATE TABLE IF NOT EXISTS announcement_reads (
+    id              SERIAL PRIMARY KEY,
+    announcement_id integer NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+    employee_id     integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    read_at         timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (announcement_id, employee_id)
+);
+
+CREATE INDEX IF NOT EXISTS announcement_reads_announcement_idx ON announcement_reads (announcement_id);

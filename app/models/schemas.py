@@ -90,6 +90,12 @@ class GenerateShiftsRequest(BaseModel):
     departmentId: Optional[int] = None
 
 
+class AnnouncementCreateRequest(BaseModel):
+    title: str
+    body: str
+    pinned: bool = False
+
+
 class EmployeeProfileUpdateRequest(BaseModel):
     departmentId: Optional[int] = None
     maxHoursPerWeek: Optional[float] = None
