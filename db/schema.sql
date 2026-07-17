@@ -31,6 +31,16 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_availability jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS max_hours_per_week numeric(5,2) NOT NULL DEFAULT 40;
 
+-- Smart-fill profile fields: how auto_build_schedule ranks and filters candidates beyond the
+-- hard rules in validate_assignment (role/availability/overtime/rest). All of these are
+-- candidate-selection concerns for the auto paths only -- manual assignment ignores them, so a
+-- manager overriding the algorithm by hand always still works.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS scheduling_confidence smallint NOT NULL DEFAULT 3 CHECK (scheduling_confidence BETWEEN 1 AND 5);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS min_hours_per_week numeric(5,2) NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_hours_per_week numeric(5,2);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS scheduling_notes text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_schedule_opt_out boolean NOT NULL DEFAULT false;
+
 -- Departments sit between the restaurant and its roles/employees (Location -> Department ->
 -- Role -> Employee). Each department binds to one of the existing foh/boh role categories
 -- rather than introducing a separate custom-role taxonomy, so validate_assignment's role-match
@@ -97,6 +107,35 @@ UPDATE shifts s
 SET department_id = d.id
 FROM departments d
 WHERE d.resto_id = s.resto_id AND d.role_category = s.role_required AND s.department_id IS NULL;
+
+-- Layer 1 of the scheduling workflow: staffing needs per day-of-week/time-block/department,
+-- decoupled from any actual shift or employee (layers 2 and 3). A row with week_start_override
+-- NULL is the recurring weekly default; a row with it set to a Monday applies only to that ISO
+-- week, replacing the default for that (day_of_week, department_id) pair -- this is how a
+-- manager overrides a single week (e.g. a holiday) without editing the template every other
+-- week reuses.
+CREATE TABLE IF NOT EXISTS coverage_requirements (
+    id                  SERIAL PRIMARY KEY,
+    resto_id            integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+    department_id       integer NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+    day_of_week         smallint NOT NULL CHECK (day_of_week BETWEEN 0 AND 6), -- Monday=0..Sunday=6, matches date.weekday()/week_start()
+    week_start_override date,
+    start_time          time NOT NULL,
+    end_time            time NOT NULL,
+    count_required      smallint NOT NULL CHECK (count_required > 0),
+    min_confidence      smallint CHECK (min_confidence BETWEEN 1 AND 5),
+    notes               text NOT NULL DEFAULT '',
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    CHECK (start_time <> end_time)
+);
+
+CREATE INDEX IF NOT EXISTS coverage_requirements_resto_day_idx ON coverage_requirements (resto_id, day_of_week);
+CREATE INDEX IF NOT EXISTS coverage_requirements_override_idx ON coverage_requirements (resto_id, week_start_override) WHERE week_start_override IS NOT NULL;
+
+-- Traces a generated shift back to the requirement block that produced it -- what makes
+-- "Generate Shifts" idempotent (re-running it tops up the gap rather than duplicating).
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS requirement_id integer REFERENCES coverage_requirements(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS shifts_requirement_idx ON shifts (requirement_id);
 
 CREATE TABLE IF NOT EXISTS swap_requests (
     id                     SERIAL PRIMARY KEY,

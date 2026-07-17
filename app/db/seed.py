@@ -22,6 +22,13 @@ FULL_WEEK_AVAILABILITY = (
     '"sunday":[{"start":"00:00","end":"23:59"}]}'
 )
 
+# Varied so Smart Fill's confidence gating has something real to filter on in the demo: Jordan
+# and Bailey are "experienced" (qualify for high-confidence blocks), Taylor and Alex are not.
+DEMO_CONFIDENCE = {
+    "foh@demo.com": 3, "jordan@demo.com": 5, "taylor@demo.com": 2,
+    "boh@demo.com": 4, "alex@demo.com": 2,
+}
+
 
 async def seed_demo_data(pool: asyncpg.Pool) -> None:
     if await pool.fetchval("SELECT count(*) FROM users"):
@@ -56,3 +63,38 @@ async def seed_demo_data(pool: asyncpg.Pool) -> None:
             FULL_WEEK_AVAILABILITY,
         )
     print("[db] Seeded demo restaurant + 3 dummy users (manager/foh/boh)")
+
+
+async def seed_scheduling_defaults(pool: asyncpg.Pool) -> None:
+    """Coverage-requirement + confidence demo data. Called separately from seed_demo_data (and
+    after main.py's second init_db() pass), because departments only exist once the schema has
+    run against the just-created demo restaurant -- see main.py's lifespan comment."""
+    restaurant_id = await pool.fetchval("SELECT id FROM restaurants WHERE name = 'Demo Restaurant'")
+    if not restaurant_id:
+        return
+    for email, confidence in DEMO_CONFIDENCE.items():
+        await pool.execute("UPDATE users SET scheduling_confidence = $1 WHERE email = $2", confidence, email)
+    if await pool.fetchval("SELECT 1 FROM coverage_requirements WHERE resto_id = $1", restaurant_id):
+        return
+    foh = await pool.fetchval("SELECT id FROM departments WHERE resto_id = $1 AND role_category = 'foh'", restaurant_id)
+    boh = await pool.fetchval("SELECT id FROM departments WHERE resto_id = $1 AND role_category = 'boh'", restaurant_id)
+    if not foh:
+        return
+    for day in range(5):  # Monday-Friday dinner rush
+        await pool.execute(
+            """INSERT INTO coverage_requirements (resto_id, department_id, day_of_week, start_time, end_time, count_required, min_confidence, notes)
+               VALUES ($1, $2, $3, '17:00', '21:00', 2, 3, 'Weekday dinner rush')""",
+            restaurant_id, foh, day,
+        )
+        if boh:
+            await pool.execute(
+                """INSERT INTO coverage_requirements (resto_id, department_id, day_of_week, start_time, end_time, count_required, notes)
+                   VALUES ($1, $2, $3, '17:00', '21:00', 1, 'Weekday dinner rush')""",
+                restaurant_id, boh, day,
+            )
+    await pool.execute(
+        """INSERT INTO coverage_requirements (resto_id, department_id, day_of_week, start_time, end_time, count_required, min_confidence, notes)
+           VALUES ($1, $2, 5, '17:00', '22:00', 2, 5, 'Saturday dinner rush -- experienced staff only')""",
+        restaurant_id, foh,
+    )
+    print("[db] Seeded demo coverage requirements + confidence ratings")

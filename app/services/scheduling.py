@@ -116,6 +116,59 @@ async def validate_assignment(
     return dict(employee)
 
 
+async def resolve_effective_requirements(pool, resto_id: int, monday: date) -> list[dict]:
+    """Layer 1 for one week: recurring day-of-week rows, replaced per (day, department) by any
+    override row scoped to this specific Monday. Each block gets its concrete `date` computed
+    from `monday + day_of_week`."""
+    rows = await pool.fetch(
+        """SELECT cr.*, d.name AS department_name, d.role_category FROM coverage_requirements cr
+           JOIN departments d ON d.id = cr.department_id
+           WHERE cr.resto_id = $1 AND (cr.week_start_override = $2 OR cr.week_start_override IS NULL)
+           ORDER BY cr.day_of_week, cr.start_time""",
+        resto_id, monday,
+    )
+    overridden_pairs = {(row["day_of_week"], row["department_id"]) for row in rows if row["week_start_override"] == monday}
+    effective = [
+        row for row in rows
+        if row["week_start_override"] == monday or (row["day_of_week"], row["department_id"]) not in overridden_pairs
+    ]
+    return [
+        {
+            "id": row["id"], "departmentId": row["department_id"], "departmentName": row["department_name"],
+            "roleCategory": row["role_category"], "dayOfWeek": row["day_of_week"],
+            "date": (monday + timedelta(days=row["day_of_week"])).isoformat(),
+            "startTime": row["start_time"].isoformat(timespec="minutes"), "endTime": row["end_time"].isoformat(timespec="minutes"),
+            "countRequired": row["count_required"], "minConfidence": row["min_confidence"], "notes": row["notes"],
+            "isOverride": row["week_start_override"] == monday,
+        }
+        for row in effective
+    ]
+
+
+async def generate_shifts_from_requirements(connection, resto_id: int, monday: date, department_id: Optional[int] = None) -> dict:
+    """Layer 1 -> 2: materialize open shifts to close the gap between each effective requirement
+    block's count_required and shifts already tagged with that requirement on that date."""
+    blocks = await resolve_effective_requirements(connection, resto_id, monday)
+    if department_id is not None:
+        blocks = [b for b in blocks if b["departmentId"] == department_id]
+    created, skipped_count = [], 0
+    for block in blocks:
+        shift_date = date.fromisoformat(block["date"])
+        existing_count = await connection.fetchval(
+            "SELECT count(*) FROM shifts WHERE requirement_id = $1 AND shift_date = $2", block["id"], shift_date,
+        )
+        skipped_count += min(existing_count, block["countRequired"])
+        for _ in range(max(0, block["countRequired"] - existing_count)):
+            row = await connection.fetchrow(
+                """INSERT INTO shifts (resto_id, employee_id, role_required, department_id, shift_date, start_time, end_time, status, is_draft, requirement_id)
+                   VALUES ($1, NULL, $2, $3, $4, $5, $6, 'Open', true, $7) RETURNING id""",
+                resto_id, block["roleCategory"], block["departmentId"], shift_date,
+                parse_time(block["startTime"]), parse_time(block["endTime"]), block["id"],
+            )
+            created.append(await serialize_shift(connection, row))
+    return {"created": created, "skippedCount": skipped_count}
+
+
 async def release_shift_if_no_live_swaps(connection, shift_id: int) -> None:
     """Revert a shift to 'Scheduled' once no swap_requests remain live for it."""
     live = await connection.fetchval(
@@ -141,4 +194,5 @@ async def serialize_shift(pool, shift) -> dict:
         "departmentId": row["department_id"], "departmentName": row["department_name"],
         "date": row["shift_date"].isoformat(), "startTime": row["start_time"].isoformat(timespec="minutes"),
         "endTime": row["end_time"].isoformat(timespec="minutes"), "status": row["status"], "isDraft": row["is_draft"],
+        "requirementId": row["requirement_id"],
     }
