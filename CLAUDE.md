@@ -17,7 +17,7 @@ Standard FastAPI package layout under `app/`:
 
 Entrypoint is `app.main:app` (see `Dockerfile` / `scripts/dev.sh`), run from the repo root so `db/schema.sql` (still a top-level directory, not under `app/`) resolves correctly relative to `app/db/session.py`.
 
-**No migration framework.** `db/schema.sql` is executed verbatim on every process boot (`init_db`, called from the FastAPI `lifespan` context in `app/main.py`). Every statement in it must stay idempotent — `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. This is how dev/demo databases stay in sync without Alembic or similar; if you add a column, add it as an idempotent `ALTER` at the bottom of the relevant block, don't rewrite the `CREATE TABLE`.
+**No migration framework yet.** `db/schema.sql` is executed verbatim on every process boot (`init_db`, called from the FastAPI `lifespan` context in `app/main.py`). It is plain `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` statements only — deliberately **not** `ALTER TABLE ... ADD COLUMN`, and deliberately no data-backfill `UPDATE`/`INSERT ... WHERE NOT EXISTS` logic either (that kind of default-provisioning now lives in `app/db/seed.py`, next to the restaurant/user creation it belongs with). When you add a column, add it directly to the `CREATE TABLE` — don't reach for `ALTER`. This keeps the file a clean target for an eventual Alembic migration (or an equivalent) to take over: schema definition only, no embedded business logic, no accumulated migration history to translate. The practical cost today is that this file only ever produces the *current* shape of a fresh database — it does not know how to evolve an existing one, so a schema change against a database that already has the old table shape requires dropping and recreating it (fine for local/demo Postgres; would need a real migration tool before this app has real customer data to preserve across a schema change).
 
 If the DB is unreachable at startup, the app still boots (`lifespan` swallows the exception) — required for Cloud Run, which kills a revision that doesn't bind to `$PORT` in time. Routes that need `db.pool` will 503 individually instead.
 
@@ -63,7 +63,7 @@ cp .env.example .env.local   # already present in a working checkout
 ```
 or via Docker: `npm run dev` (`docker compose up`) — API on `:8001`, Postgres 15 on `:5432` (`postgres`/`postgres`/`crewlee`).
 
-Demo accounts (auto-seeded on first boot against an empty `users` table, and idempotently backfilled with full-week availability on subsequent boots against pre-scheduling dev DBs): `manager@demo.com`, `foh@demo.com`, `jordan@demo.com`, `taylor@demo.com`, `boh@demo.com`, `alex@demo.com` — all password `password123`.
+Demo accounts (auto-seeded on first boot against an empty `users` table — see `app/db/seed.py`; a database that already has users is left alone): `manager@demo.com`, `foh@demo.com`, `jordan@demo.com`, `taylor@demo.com`, `boh@demo.com`, `alex@demo.com` — all password `password123`.
 
 ## Known limitations
 

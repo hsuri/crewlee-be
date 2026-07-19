@@ -20,12 +20,6 @@ async def lifespan(app: FastAPI):
         if db.pool:
             await db.init_db(db.pool)
             await seed.seed_demo_data(db.pool)
-            # Re-run the idempotent schema so department defaults backfill onto any
-            # restaurant/users just created by seed_demo_data on a fresh DB, without
-            # requiring a second process restart.
-            await db.init_db(db.pool)
-            # Coverage requirements reference departments, which only exist after the
-            # init_db() pass above, so this has to run as its own step afterward.
             await seed.seed_scheduling_defaults(db.pool)
     except Exception as e:
         # DB failure must not prevent the container from starting —
