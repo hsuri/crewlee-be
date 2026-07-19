@@ -103,6 +103,20 @@ async def rename_department(department_id: int, payload: DepartmentUpdateRequest
     return {"id": row["id"], "name": row["name"], "roleCategory": row["role_category"]}
 
 
+@router.delete("/api/scheduling/departments/{department_id}")
+async def delete_department(department_id: int, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can delete departments")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    # users.department_id and shifts.department_id are ON DELETE SET NULL (employees/shifts just
+    # become unassigned), coverage_requirements.department_id is ON DELETE CASCADE (a requirement
+    # block can't exist without a department) -- both handled by the FKs, no manual cleanup here.
+    row = await db.pool.fetchrow("DELETE FROM departments WHERE id = $1 AND resto_id = $2 RETURNING id", department_id, restaurant_id)
+    if not row:
+        raise HTTPException(404, detail="Department not found")
+    return {"id": department_id, "deleted": True}
+
+
 @router.get("/api/scheduling/employees")
 async def scheduling_employees(departmentId: Optional[int] = None, user: dict = Depends(require_user)):
     if user["role"] != "manager":
