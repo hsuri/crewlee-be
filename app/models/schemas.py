@@ -64,3 +64,43 @@ class AvailabilityRequest(BaseModel):
 
 class SwapDecisionRequest(BaseModel):
     approve: bool
+
+
+class RequirementCreateRequest(BaseModel):
+    departmentId: int
+    dayOfWeek: int
+    startTime: str
+    endTime: str
+    countRequired: int
+    minConfidence: Optional[int] = None
+    notes: str = ""
+    weekStartOverride: Optional[str] = None
+
+
+class RequirementUpdateRequest(BaseModel):
+    startTime: str
+    endTime: str
+    countRequired: int
+    minConfidence: Optional[int] = None
+    notes: str = ""
+
+
+class GenerateShiftsRequest(BaseModel):
+    weekStart: str
+    departmentId: Optional[int] = None
+
+
+class AnnouncementCreateRequest(BaseModel):
+    title: str
+    body: str
+    pinned: bool = False
+
+
+class EmployeeProfileUpdateRequest(BaseModel):
+    departmentId: Optional[int] = None
+    maxHoursPerWeek: Optional[float] = None
+    minHoursPerWeek: Optional[float] = None
+    preferredHoursPerWeek: Optional[float] = None
+    schedulingConfidence: Optional[int] = None
+    schedulingNotes: Optional[str] = None
+    autoScheduleOptOut: Optional[bool] = None

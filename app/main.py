@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import auth, health, public_config, scheduling, waitlist
+from app.api.routes import announcements, auth, health, public_config, scheduling, waitlist
 from app.core.config import PROJECT_NAME
 from app.db import seed
 from app.db import session as db
@@ -20,10 +20,7 @@ async def lifespan(app: FastAPI):
         if db.pool:
             await db.init_db(db.pool)
             await seed.seed_demo_data(db.pool)
-            # Re-run the idempotent schema so department defaults backfill onto any
-            # restaurant/users just created by seed_demo_data on a fresh DB, without
-            # requiring a second process restart.
-            await db.init_db(db.pool)
+            await seed.seed_scheduling_defaults(db.pool)
     except Exception as e:
         # DB failure must not prevent the container from starting —
         # Cloud Run kills the revision if the process dies before binding to PORT.
@@ -54,3 +51,4 @@ app.include_router(public_config.router)
 app.include_router(waitlist.router)
 app.include_router(auth.router)
 app.include_router(scheduling.router)
+app.include_router(announcements.router)

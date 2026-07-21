@@ -11,16 +11,22 @@ from app.models.schemas import (
     AvailabilityRequest,
     DepartmentCreateRequest,
     DepartmentUpdateRequest,
+    EmployeeProfileUpdateRequest,
+    GenerateShiftsRequest,
     PublishRequest,
+    RequirementCreateRequest,
+    RequirementUpdateRequest,
     ShiftCreateRequest,
     ShiftUpdateRequest,
     SwapDecisionRequest,
     TemplateSaveRequest,
 )
 from app.services.scheduling import (
+    generate_shifts_from_requirements,
     parse_date,
     parse_time,
     release_shift_if_no_live_swaps,
+    resolve_effective_requirements,
     serialize_shift,
     shift_hours,
     validate_assignment,
@@ -97,6 +103,20 @@ async def rename_department(department_id: int, payload: DepartmentUpdateRequest
     return {"id": row["id"], "name": row["name"], "roleCategory": row["role_category"]}
 
 
+@router.delete("/api/scheduling/departments/{department_id}")
+async def delete_department(department_id: int, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can delete departments")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    # users.department_id and shifts.department_id are ON DELETE SET NULL (employees/shifts just
+    # become unassigned), coverage_requirements.department_id is ON DELETE CASCADE (a requirement
+    # block can't exist without a department) -- both handled by the FKs, no manual cleanup here.
+    row = await db.pool.fetchrow("DELETE FROM departments WHERE id = $1 AND resto_id = $2 RETURNING id", department_id, restaurant_id)
+    if not row:
+        raise HTTPException(404, detail="Department not found")
+    return {"id": department_id, "deleted": True}
+
+
 @router.get("/api/scheduling/employees")
 async def scheduling_employees(departmentId: Optional[int] = None, user: dict = Depends(require_user)):
     if user["role"] != "manager":
@@ -106,7 +126,9 @@ async def scheduling_employees(departmentId: Optional[int] = None, user: dict = 
     if departmentId is not None:
         args.append(departmentId); conditions.append(f"u.department_id = ${len(args)}")
     rows = await db.pool.fetch(
-        f"""SELECT u.id, u.name, r.name AS role, u.department_id, d.name AS department_name, u.weekly_availability
+        f"""SELECT u.id, u.name, r.name AS role, u.department_id, d.name AS department_name, u.weekly_availability,
+                  u.max_hours_per_week, u.min_hours_per_week, u.preferred_hours_per_week,
+                  u.scheduling_confidence, u.scheduling_notes, u.auto_schedule_opt_out
             FROM users u JOIN roles r ON r.id = u.role_id
             LEFT JOIN departments d ON d.id = u.department_id
             WHERE {' AND '.join(conditions)} ORDER BY u.name""", *args,
@@ -120,7 +142,122 @@ async def scheduling_employees(departmentId: Optional[int] = None, user: dict = 
             "id": row["id"], "name": row["name"], "role": row["role"],
             "departmentId": row["department_id"], "departmentName": row["department_name"],
             "weeklyAvailability": availability or {},
+            "maxHoursPerWeek": float(row["max_hours_per_week"]), "minHoursPerWeek": float(row["min_hours_per_week"]),
+            "preferredHoursPerWeek": float(row["preferred_hours_per_week"]) if row["preferred_hours_per_week"] is not None else None,
+            "schedulingConfidence": row["scheduling_confidence"], "schedulingNotes": row["scheduling_notes"],
+            "autoScheduleOptOut": row["auto_schedule_opt_out"],
         })
+    return result
+
+
+@router.patch("/api/scheduling/employees/{employee_id}")
+async def update_employee_profile(employee_id: int, payload: EmployeeProfileUpdateRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can edit team profiles")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    employee = await db.pool.fetchrow("SELECT * FROM users WHERE id = $1 AND restaurant_id = $2", employee_id, restaurant_id)
+    if not employee:
+        raise HTTPException(404, detail="Employee not found")
+    if payload.schedulingConfidence is not None and not (1 <= payload.schedulingConfidence <= 5):
+        raise HTTPException(422, detail="schedulingConfidence must be between 1 and 5")
+    max_hours = payload.maxHoursPerWeek if payload.maxHoursPerWeek is not None else float(employee["max_hours_per_week"])
+    min_hours = payload.minHoursPerWeek if payload.minHoursPerWeek is not None else float(employee["min_hours_per_week"])
+    if min_hours > max_hours:
+        raise HTTPException(422, detail="minHoursPerWeek cannot exceed maxHoursPerWeek")
+    if payload.departmentId is not None:
+        department = await db.pool.fetchrow("SELECT id FROM departments WHERE id = $1 AND resto_id = $2", payload.departmentId, restaurant_id)
+        if not department:
+            raise HTTPException(404, detail="Department not found")
+    await db.pool.execute(
+        """UPDATE users SET department_id = COALESCE($1, department_id), max_hours_per_week = $2, min_hours_per_week = $3,
+           preferred_hours_per_week = $4, scheduling_confidence = COALESCE($5, scheduling_confidence),
+           scheduling_notes = COALESCE($6, scheduling_notes), auto_schedule_opt_out = COALESCE($7, auto_schedule_opt_out)
+           WHERE id = $8""",
+        payload.departmentId, max_hours, min_hours, payload.preferredHoursPerWeek, payload.schedulingConfidence,
+        payload.schedulingNotes, payload.autoScheduleOptOut, employee_id,
+    )
+    return {"id": employee_id, "updated": True}
+
+
+@router.get("/api/scheduling/requirements")
+async def list_requirements(weekStart: str, departmentId: Optional[int] = None, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can view staffing requirements")
+    restaurant_id, monday = await _restaurant_id_for(user["id"]), week_start(parse_date(weekStart))
+    blocks = await resolve_effective_requirements(db.pool, restaurant_id, monday)
+    if departmentId is not None:
+        blocks = [b for b in blocks if b["departmentId"] == departmentId]
+    return blocks
+
+
+@router.post("/api/scheduling/requirements")
+async def create_requirement(payload: RequirementCreateRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can define staffing requirements")
+    if not (0 <= payload.dayOfWeek <= 6):
+        raise HTTPException(422, detail="dayOfWeek must be between 0 (Monday) and 6 (Sunday)")
+    if payload.countRequired <= 0:
+        raise HTTPException(422, detail="countRequired must be positive")
+    if payload.minConfidence is not None and not (1 <= payload.minConfidence <= 5):
+        raise HTTPException(422, detail="minConfidence must be between 1 and 5")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    department = await db.pool.fetchrow("SELECT id FROM departments WHERE id = $1 AND resto_id = $2", payload.departmentId, restaurant_id)
+    if not department:
+        raise HTTPException(404, detail="Department not found")
+    start_time, end_time = parse_time(payload.startTime), parse_time(payload.endTime)
+    if start_time == end_time:
+        raise HTTPException(422, detail="startTime and endTime must differ")
+    week_start_override = week_start(parse_date(payload.weekStartOverride)) if payload.weekStartOverride else None
+    row = await db.pool.fetchrow(
+        """INSERT INTO coverage_requirements (resto_id, department_id, day_of_week, week_start_override, start_time, end_time, count_required, min_confidence, notes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id""",
+        restaurant_id, payload.departmentId, payload.dayOfWeek, week_start_override, start_time, end_time,
+        payload.countRequired, payload.minConfidence, payload.notes,
+    )
+    return {"id": row["id"]}
+
+
+@router.patch("/api/scheduling/requirements/{requirement_id}")
+async def update_requirement(requirement_id: int, payload: RequirementUpdateRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can edit staffing requirements")
+    if payload.countRequired <= 0:
+        raise HTTPException(422, detail="countRequired must be positive")
+    if payload.minConfidence is not None and not (1 <= payload.minConfidence <= 5):
+        raise HTTPException(422, detail="minConfidence must be between 1 and 5")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    start_time, end_time = parse_time(payload.startTime), parse_time(payload.endTime)
+    if start_time == end_time:
+        raise HTTPException(422, detail="startTime and endTime must differ")
+    row = await db.pool.fetchrow(
+        """UPDATE coverage_requirements SET start_time = $1, end_time = $2, count_required = $3, min_confidence = $4, notes = $5
+           WHERE id = $6 AND resto_id = $7 RETURNING id""",
+        start_time, end_time, payload.countRequired, payload.minConfidence, payload.notes, requirement_id, restaurant_id,
+    )
+    if not row:
+        raise HTTPException(404, detail="Requirement not found")
+    return {"id": row["id"]}
+
+
+@router.delete("/api/scheduling/requirements/{requirement_id}")
+async def delete_requirement(requirement_id: int, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can delete staffing requirements")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    row = await db.pool.fetchrow("DELETE FROM coverage_requirements WHERE id = $1 AND resto_id = $2 RETURNING id", requirement_id, restaurant_id)
+    if not row:
+        raise HTTPException(404, detail="Requirement not found")
+    return {"id": requirement_id, "deleted": True}
+
+
+@router.post("/api/scheduling/requirements/generate-shifts")
+async def generate_shifts(payload: GenerateShiftsRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can generate shifts")
+    restaurant_id, monday = await _restaurant_id_for(user["id"]), week_start(parse_date(payload.weekStart))
+    async with db.pool.acquire() as connection:
+        async with connection.transaction():
+            result = await generate_shifts_from_requirements(connection, restaurant_id, monday, payload.departmentId)
     return result
 
 
@@ -182,18 +319,28 @@ async def auto_build_schedule(payload: AutoBuildRequest, user: dict = Depends(re
     async with db.pool.acquire() as connection:
         async with connection.transaction():
             open_shifts = await connection.fetch(
-                "SELECT * FROM shifts WHERE resto_id = $1 AND shift_date BETWEEN $2 AND $3 AND employee_id IS NULL AND status = 'Open' ORDER BY shift_date, start_time",
+                """SELECT s.*, cr.min_confidence FROM shifts s LEFT JOIN coverage_requirements cr ON cr.id = s.requirement_id
+                   WHERE s.resto_id = $1 AND s.shift_date BETWEEN $2 AND $3 AND s.employee_id IS NULL AND s.status = 'Open'
+                   ORDER BY s.shift_date, s.start_time""",
                 restaurant_id, monday, sunday,
             )
             for shift in open_shifts:
                 candidates = await connection.fetch(
-                    "SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id WHERE u.restaurant_id = $1 AND r.name = $2 AND u.department_id = $3",
+                    """SELECT u.id, u.scheduling_confidence, u.min_hours_per_week FROM users u JOIN roles r ON r.id = u.role_id
+                       WHERE u.restaurant_id = $1 AND r.name = $2 AND u.department_id = $3 AND u.auto_schedule_opt_out = false""",
                     restaurant_id, shift["role_required"], shift["department_id"],
                 )
-                # Rank by hours already assigned this week (fewest first) so open shifts spread
-                # fairly across the team instead of always going to the lowest user id. Hours are
-                # re-queried per shift (within the same transaction) so earlier assignments made
-                # during this same run are reflected in the next shift's ranking.
+                # Busy blocks can declare a min_confidence (set explicitly by a manager on the
+                # requirement, not inferred) -- candidates below it are excluded from Smart Fill
+                # entirely, though a manager can still place them manually via drag-and-drop.
+                if shift["min_confidence"] is not None:
+                    candidates = [c for c in candidates if c["scheduling_confidence"] >= shift["min_confidence"]]
+                # Rank by: (1) anyone still under their own weekly minimum first, (2) fewest hours
+                # already assigned this week (fairness), (3) higher confidence as a tiebreaker,
+                # but only on blocks that actually declared a confidence requirement -- confidence
+                # never overrides fairness on an ordinary shift. Hours are re-queried per shift
+                # (within the same transaction) so earlier assignments made during this same run
+                # are reflected in the next shift's ranking.
                 ranked = []
                 for candidate in candidates:
                     existing = await connection.fetch(
@@ -201,7 +348,9 @@ async def auto_build_schedule(payload: AutoBuildRequest, user: dict = Depends(re
                         candidate["id"], monday, sunday,
                     )
                     hours = sum(shift_hours(row["shift_date"], row["start_time"], row["end_time"]) for row in existing)
-                    ranked.append((hours, candidate["id"]))
+                    below_minimum = hours < float(candidate["min_hours_per_week"] or 0) - 1e-9
+                    confidence_tiebreak = -candidate["scheduling_confidence"] if shift["min_confidence"] is not None else 0
+                    ranked.append(((0 if below_minimum else 1, hours, confidence_tiebreak), candidate["id"]))
                 ranked.sort(key=lambda pair: pair[0])
                 chosen = None
                 for _, candidate_id in ranked:
