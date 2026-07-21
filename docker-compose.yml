@@ -16,7 +16,9 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:15-alpine
+    # pgvector/pgvector:pg15 is upstream postgres:15 with the pgvector extension
+    # precompiled in -- needed for the RAG knowledge base's embedding column (rag_chunks).
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

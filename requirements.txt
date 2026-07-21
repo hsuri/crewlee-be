@@ -3,3 +3,5 @@ uvicorn==0.32.1
 asyncpg==0.30.0
 python-dotenv==1.0.1
 bcrypt==4.2.1
+anthropic==0.117.0
+voyageai==0.5.0
