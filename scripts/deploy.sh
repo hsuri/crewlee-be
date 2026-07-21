@@ -35,7 +35,7 @@ with open('.env.production') as f:
             k, v = line.split('=', 1)
             vals[k.strip()] = v.strip()
 
-for key in ['DB_PASSWORD', 'ADMIN_PASSWORD', 'ALLOWED_ORIGINS']:
+for key in ['DB_PASSWORD', 'ADMIN_PASSWORD', 'ALLOWED_ORIGINS', 'VOYAGE_API_KEY', 'ANTHROPIC_API_KEY', 'RAG_BUCKET_NAME']:
     if key in vals:
         print(f'{key}={shlex.quote(vals[key])}')
 PYEOF
@@ -50,6 +50,13 @@ fi
 if [ -z "${ADMIN_PASSWORD:-}" ]; then
   read -rsp "Admin panel password:        " ADMIN_PASSWORD; echo ""
 fi
+if [ -z "${VOYAGE_API_KEY:-}" ]; then
+  read -rsp "Voyage AI API key:           " VOYAGE_API_KEY; echo ""
+fi
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  read -rsp "Anthropic API key:           " ANTHROPIC_API_KEY; echo ""
+fi
+RAG_BUCKET_NAME="${RAG_BUCKET_NAME:-crewlee-rag-docs}"
 
 # ── ALLOWED_ORIGINS ────────────────────────────────────────────────────────────
 if [ -z "${ALLOWED_ORIGINS:-}" ]; then
@@ -84,7 +91,10 @@ _CLOUD_SQL_INSTANCE=$CLOUD_SQL,\
 _DATABASE_URL=$DATABASE_URL,\
 _DB_PASSWORD=$DB_PASSWORD,\
 _ADMIN_PASSWORD=$ADMIN_PASSWORD,\
-_ALLOWED_ORIGINS=$ALLOWED_ORIGINS" \
+_ALLOWED_ORIGINS=$ALLOWED_ORIGINS,\
+_VOYAGE_API_KEY=$VOYAGE_API_KEY,\
+_ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY,\
+_RAG_BUCKET_NAME=$RAG_BUCKET_NAME" \
   .
 
 echo ""

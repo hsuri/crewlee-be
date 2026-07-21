@@ -96,20 +96,6 @@ class AnnouncementCreateRequest(BaseModel):
     pinned: bool = False
 
 
-class RagDocumentCreateRequest(BaseModel):
-    title: str
-    content: str
-    docType: str = "other"
-    visibility: str = "employee"
-
-
-class RagDocumentUpdateRequest(BaseModel):
-    title: str
-    content: str
-    docType: str = "other"
-    visibility: str = "employee"
-
-
 class RagQueryRequest(BaseModel):
     question: str
 

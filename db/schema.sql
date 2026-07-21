@@ -162,17 +162,24 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- (owner/manager/employee) for a possible future document-level access model -- it is not
 -- enforced anywhere yet, every restaurant member can currently read every document
 -- regardless of this value. No version history: PUT replaces a document's content and
--- chunks in place rather than keeping prior revisions.
+-- chunks in place rather than keeping prior revisions. `content` is text extracted at
+-- upload time from the original PDF/DOCX/pasted-text-as-.txt (app/services/rag.py's
+-- extract_text) -- the original file itself lives in GCS at `gcs_path`, not in Postgres.
 CREATE TABLE IF NOT EXISTS rag_documents (
-    id          SERIAL PRIMARY KEY,
-    resto_id    integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
-    uploaded_by integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    title       text NOT NULL,
-    doc_type    text NOT NULL DEFAULT 'other' CHECK (doc_type IN ('recipe', 'sop', 'training', 'license', 'other')),
-    visibility  text NOT NULL DEFAULT 'employee' CHECK (visibility IN ('owner', 'manager', 'employee')),
-    content     text NOT NULL,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now()
+    id                SERIAL PRIMARY KEY,
+    resto_id          integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+    uploaded_by       integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title             text NOT NULL,
+    doc_type          text NOT NULL DEFAULT 'other' CHECK (doc_type IN ('recipe', 'sop', 'training', 'license', 'other')),
+    visibility        text NOT NULL DEFAULT 'employee' CHECK (visibility IN ('owner', 'manager', 'employee')),
+    content           text NOT NULL,
+    original_filename text NOT NULL,
+    file_type         text NOT NULL CHECK (file_type IN ('pdf', 'docx', 'txt')),
+    -- Nullable because it's filled in right after the GCS upload (which needs to succeed
+    -- first -- see _prepare_chunks in app/api/routes/rag.py) rather than in this same insert.
+    gcs_path          text,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS rag_documents_resto_idx ON rag_documents (resto_id);
