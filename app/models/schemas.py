@@ -96,6 +96,10 @@ class AnnouncementCreateRequest(BaseModel):
     pinned: bool = False
 
 
+class RagQueryRequest(BaseModel):
+    question: str
+
+
 class EmployeeProfileUpdateRequest(BaseModel):
     departmentId: Optional[int] = None
     maxHoursPerWeek: Optional[float] = None

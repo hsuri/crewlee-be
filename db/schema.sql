@@ -154,3 +154,50 @@ CREATE TABLE IF NOT EXISTS announcement_reads (
 );
 
 CREATE INDEX IF NOT EXISTS announcement_reads_announcement_idx ON announcement_reads (announcement_id);
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- RAG knowledge base: managers upload documents (recipes, SOPs, training docs, licenses)
+-- and employees query them conversationally. `visibility` is a forward-looking tier
+-- (owner/manager/employee) for a possible future document-level access model -- it is not
+-- enforced anywhere yet, every restaurant member can currently read every document
+-- regardless of this value. No version history: PUT replaces a document's content and
+-- chunks in place rather than keeping prior revisions. `content` is text extracted at
+-- upload time from the original PDF/DOCX/pasted-text-as-.txt (app/services/rag.py's
+-- extract_text) -- the original file itself lives in GCS at `gcs_path`, not in Postgres.
+CREATE TABLE IF NOT EXISTS rag_documents (
+    id                SERIAL PRIMARY KEY,
+    resto_id          integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+    uploaded_by       integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title             text NOT NULL,
+    doc_type          text NOT NULL DEFAULT 'other' CHECK (doc_type IN ('recipe', 'sop', 'training', 'license', 'other')),
+    visibility        text NOT NULL DEFAULT 'employee' CHECK (visibility IN ('owner', 'manager', 'employee')),
+    content           text NOT NULL,
+    original_filename text NOT NULL,
+    file_type         text NOT NULL CHECK (file_type IN ('pdf', 'docx', 'txt')),
+    -- Nullable because it's filled in right after the GCS upload (which needs to succeed
+    -- first -- see _prepare_chunks in app/api/routes/rag.py) rather than in this same insert.
+    gcs_path          text,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS rag_documents_resto_idx ON rag_documents (resto_id);
+
+-- One row per chunk of a document's content, embedded independently for retrieval.
+-- resto_id is denormalized from rag_documents so a query can filter/index on it directly
+-- without a join. embedding is sized for voyage-3-lite (512 dims) -- change RAG_EMBEDDING_DIM
+-- in app/core/config.py and this column together if the embedding model ever changes.
+CREATE TABLE IF NOT EXISTS rag_chunks (
+    id          SERIAL PRIMARY KEY,
+    document_id integer NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
+    resto_id    integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+    chunk_index smallint NOT NULL,
+    content     text NOT NULL,
+    embedding   vector(512) NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS rag_chunks_document_idx ON rag_chunks (document_id);
+CREATE INDEX IF NOT EXISTS rag_chunks_resto_idx ON rag_chunks (resto_id);
+CREATE INDEX IF NOT EXISTS rag_chunks_embedding_idx ON rag_chunks USING hnsw (embedding vector_cosine_ops);

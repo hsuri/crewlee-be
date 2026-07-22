@@ -23,7 +23,7 @@ steps:
       - '--platform=managed'
       - '--add-cloudsql-instances=${_CLOUD_SQL_INSTANCE}'
       - >-
-        --set-env-vars=DATABASE_URL=${_DATABASE_URL},DB_PASSWORD=${_DB_PASSWORD},ADMIN_PASSWORD=${_ADMIN_PASSWORD},ALLOWED_ORIGINS=${_ALLOWED_ORIGINS}
+        --set-env-vars=DATABASE_URL=${_DATABASE_URL},DB_PASSWORD=${_DB_PASSWORD},ADMIN_PASSWORD=${_ADMIN_PASSWORD},ALLOWED_ORIGINS=${_ALLOWED_ORIGINS},VOYAGE_API_KEY=${_VOYAGE_API_KEY},ANTHROPIC_API_KEY=${_ANTHROPIC_API_KEY},RAG_BUCKET_NAME=${_RAG_BUCKET_NAME}
 
 substitutions:
   _REGION: us-central1
@@ -33,6 +33,9 @@ substitutions:
   _DB_PASSWORD: ''
   _ADMIN_PASSWORD: admin123
   _ALLOWED_ORIGINS: 'http://localhost:3000'
+  _VOYAGE_API_KEY: ''
+  _ANTHROPIC_API_KEY: ''
+  _RAG_BUCKET_NAME: crewlee-rag-docs
 
 images:
   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:latest'

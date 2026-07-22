@@ -10,13 +10,20 @@ services:
       DATABASE_URL: postgres://postgres:postgres@db:5432/crewlee
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+    volumes:
+      # RAG document uploads go to GCS (crewlee-rag-docs-local) -- mounts your own gcloud
+      # ADC so the container can authenticate as you. Run `gcloud auth application-default
+      # login` once on the host before `docker compose up` if this file doesn't exist yet.
+      - ${HOME}/.config/gcloud/application_default_credentials.json:/tmp/gcloud-adc.json:ro
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
   db:
-    image: postgres:15-alpine
+    # pgvector/pgvector:pg15 is upstream postgres:15 with the pgvector extension
+    # precompiled in -- needed for the RAG knowledge base's embedding column (rag_chunks).
+    image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

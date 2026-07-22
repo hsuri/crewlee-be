@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import announcements, auth, health, public_config, scheduling, waitlist
+from app.api.routes import announcements, auth, health, public_config, rag, scheduling, waitlist
 from app.core.config import PROJECT_NAME
 from app.db import seed
 from app.db import session as db
@@ -52,3 +52,4 @@ app.include_router(waitlist.router)
 app.include_router(auth.router)
 app.include_router(scheduling.router)
 app.include_router(announcements.router)
+app.include_router(rag.router)

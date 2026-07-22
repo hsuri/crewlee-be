@@ -39,8 +39,21 @@ gcloud services enable \
   sqladmin.googleapis.com \
   cloudbuild.googleapis.com \
   containerregistry.googleapis.com \
+  storage.googleapis.com \
   --project="$PROJECT_ID"
 echo "      APIs enabled."
+
+# ── 2b. RAG document storage bucket ────────────────────────────────────────────
+# crewlee-rag-docs holds the original PDF/DOCX files managers upload to the RAG knowledge
+# base (crewlee-rag-docs-local is the local-dev equivalent, created the same way on your own
+# machine if you need to recreate it -- it's not provisioned by this script since it's per-developer).
+echo "[2b/4] Ensuring RAG storage bucket exists..."
+RAG_BUCKET="crewlee-rag-docs"
+if ! gcloud storage buckets describe "gs://${RAG_BUCKET}" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud storage buckets create "gs://${RAG_BUCKET}" --project="$PROJECT_ID" --location="$REGION" --uniform-bucket-level-access
+else
+  echo "      gs://${RAG_BUCKET} already exists."
+fi
 
 # ── 3. IAM for Cloud Run + Cloud Build ─────────────────────────────────────────
 echo "[3/4] Setting IAM permissions..."
@@ -65,6 +78,11 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${CLOUD_BUILD_SA}" \
   --role="roles/iam.serviceAccountUser" \
   --quiet 2>/dev/null || true
+
+gcloud storage buckets add-iam-policy-binding "gs://${RAG_BUCKET}" \
+  --member="serviceAccount:${CLOUD_RUN_SA}" \
+  --role="roles/storage.objectAdmin" \
+  --project="$PROJECT_ID" --quiet 2>/dev/null || true
 
 echo "      IAM configured."
 

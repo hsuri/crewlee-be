@@ -3,3 +3,9 @@ uvicorn==0.32.1
 asyncpg==0.30.0
 python-dotenv==1.0.1
 bcrypt==4.2.1
+anthropic==0.117.0
+voyageai==0.5.0
+google-cloud-storage==3.13.0
+pypdf==6.14.2
+python-docx==1.2.0
+python-multipart==0.0.32
