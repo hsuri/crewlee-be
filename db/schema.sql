@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS users (
     role_id                  integer NOT NULL REFERENCES roles(id) ON DELETE RESTRICT,
     department_id            integer REFERENCES departments(id) ON DELETE SET NULL,
     name                     text NOT NULL,
-    email                    text NOT NULL UNIQUE,
+    -- Scoped to the restaurant, not global -- a users row is a restaurant membership, not a
+    -- platform identity, so the same email can have separate accounts at separate restaurants
+    -- (former job, second job, admin re-onboarding someone elsewhere).
+    email                    text NOT NULL,
     -- NULL = invited but hasn't chosen a password yet (POST /api/auth/set-password fills this
     -- in on first login). No email-invite link exists -- the person "signs up" themselves.
     password_hash            text,
@@ -54,8 +57,13 @@ CREATE TABLE IF NOT EXISTS users (
     scheduling_confidence    smallint NOT NULL DEFAULT 3 CHECK (scheduling_confidence BETWEEN 1 AND 5),
     scheduling_notes         text NOT NULL DEFAULT '',
     auto_schedule_opt_out    boolean NOT NULL DEFAULT false,
-    created_at               timestamptz DEFAULT now()
+    created_at               timestamptz DEFAULT now(),
+    UNIQUE(restaurant_id, email)
 );
+
+-- Composite unique index above enforces no-duplicate-per-restaurant but can't serve a plain
+-- email lookup (login, invite-status) efficiently since restaurant_id is unknown at that point.
+CREATE INDEX IF NOT EXISTS users_email_idx ON users (email);
 
 -- Layer 1 of the scheduling workflow: staffing needs per day-of-week/time-block/department,
 -- decoupled from any actual shift or employee (layers 2 and 3). A row with week_start_override
