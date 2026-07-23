@@ -19,6 +19,25 @@ class UserLoginRequest(BaseModel):
     password: str
 
 
+class SetPasswordRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RestaurantCreateRequest(BaseModel):
+    name: str
+    slug: str
+    managerName: str
+    managerEmail: str
+
+
+class EmployeeCreateRequest(BaseModel):
+    name: str
+    email: str
+    roleCategory: str
+    departmentId: Optional[int] = None
+
+
 class AutoBuildRequest(BaseModel):
     weekStart: str
 
@@ -108,3 +127,4 @@ class EmployeeProfileUpdateRequest(BaseModel):
     schedulingConfidence: Optional[int] = None
     schedulingNotes: Optional[str] = None
     autoScheduleOptOut: Optional[bool] = None
+    active: Optional[bool] = None

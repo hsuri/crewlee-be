@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS restaurants (
     id         SERIAL PRIMARY KEY,
     name       text NOT NULL,
+    slug       text NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
     created_at timestamptz DEFAULT now()
 );
 
@@ -34,7 +35,12 @@ CREATE TABLE IF NOT EXISTS users (
     department_id            integer REFERENCES departments(id) ON DELETE SET NULL,
     name                     text NOT NULL,
     email                    text NOT NULL UNIQUE,
-    password_hash            text NOT NULL,
+    -- NULL = invited but hasn't chosen a password yet (POST /api/auth/set-password fills this
+    -- in on first login). No email-invite link exists -- the person "signs up" themselves.
+    password_hash            text,
+    -- Soft-delete flag for "remove employee": false blocks login (require_user) and new shift
+    -- assignment (validate_assignment), but leaves past shifts/announcements attributed intact.
+    active                   boolean NOT NULL DEFAULT true,
     -- weekly_availability is JSON so it can represent multiple availability windows in a day
     -- without a separate employee-availability table.
     weekly_availability      jsonb NOT NULL DEFAULT '[]'::jsonb,

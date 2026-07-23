@@ -77,12 +77,14 @@ async def validate_assignment(
     shift_date: date, start_time: time, end_time: time, exclude_shift_id: Optional[int] = None,
 ) -> dict:
     employee = await pool.fetchrow(
-        """SELECT u.id, u.restaurant_id, u.weekly_availability, u.max_hours_per_week,
+        """SELECT u.id, u.restaurant_id, u.weekly_availability, u.max_hours_per_week, u.active,
                   r.name AS role
            FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = $1""", employee_id
     )
     if not employee or employee["restaurant_id"] != resto_id:
         raise HTTPException(400, detail="Employee does not belong to this restaurant")
+    if not employee["active"]:
+        raise HTTPException(400, detail="This employee has been deactivated and cannot be assigned shifts")
     if employee["role"] != role_required:
         raise HTTPException(400, detail=f"Role mismatch: this shift requires {role_required.upper()} staff")
     if not availability_allows(employee["weekly_availability"], shift_date, start_time, end_time):
