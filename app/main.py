@@ -19,10 +19,15 @@ async def lifespan(app: FastAPI):
         db.pool = await db.create_pool()
         if db.pool:
             await db.init_db(db.pool)
-            await seed.seed_demo_data(db.pool)
-            await seed.seed_scheduling_defaults(db.pool)
-            await seed.seed_scheduling_shifts(db.pool)
-            await seed.seed_announcements(db.pool)
+            # Demo data (fake users/shifts/announcements) is for local dev only -- never
+            # run it against a real restaurant's database. ENVIRONMENT=production is set
+            # by cloudbuild.yaml's Cloud Run deploy step and nowhere else, so this is
+            # unset (and seeding runs) in every other environment, including docker-compose.
+            if os.environ.get("ENVIRONMENT") != "production":
+                await seed.seed_demo_data(db.pool)
+                await seed.seed_scheduling_defaults(db.pool)
+                await seed.seed_scheduling_shifts(db.pool)
+                await seed.seed_announcements(db.pool)
     except Exception as e:
         # DB failure must not prevent the container from starting —
         # Cloud Run kills the revision if the process dies before binding to PORT.
