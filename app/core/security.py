@@ -49,13 +49,15 @@ async def require_user(authorization: Optional[str] = Header(None)) -> dict:
 
     row = await db.pool.fetchrow(
         """
-        SELECT users.id, users.name, users.email, roles.name AS role
+        SELECT users.id, users.name, users.email, users.active, roles.name AS role
         FROM users JOIN roles ON roles.id = users.role_id
         WHERE users.id = $1
         """,
         user_id,
     )
-    if not row:
+    # active is enforced here (not just at login) because tokens never expire -- this is the
+    # only checkpoint that actually stops a deactivated user's existing token from working.
+    if not row or not row["active"]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
     return dict(row)
 
