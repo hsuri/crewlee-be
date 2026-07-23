@@ -21,6 +21,8 @@ async def lifespan(app: FastAPI):
             await db.init_db(db.pool)
             await seed.seed_demo_data(db.pool)
             await seed.seed_scheduling_defaults(db.pool)
+            await seed.seed_scheduling_shifts(db.pool)
+            await seed.seed_announcements(db.pool)
     except Exception as e:
         # DB failure must not prevent the container from starting —
         # Cloud Run kills the revision if the process dies before binding to PORT.
