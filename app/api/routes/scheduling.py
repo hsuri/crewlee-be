@@ -2,6 +2,7 @@ import datetime
 import json
 from typing import Optional
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import require_user
@@ -11,6 +12,7 @@ from app.models.schemas import (
     AvailabilityRequest,
     DepartmentCreateRequest,
     DepartmentUpdateRequest,
+    EmployeeCreateRequest,
     EmployeeProfileUpdateRequest,
     GenerateShiftsRequest,
     PublishRequest,
@@ -117,6 +119,26 @@ async def delete_department(department_id: int, user: dict = Depends(require_use
     return {"id": department_id, "deleted": True}
 
 
+_EMPLOYEE_COLUMNS = """u.id, u.name, u.email, u.active, r.name AS role, u.department_id, d.name AS department_name,
+                  u.weekly_availability, u.max_hours_per_week, u.min_hours_per_week, u.preferred_hours_per_week,
+                  u.scheduling_confidence, u.scheduling_notes, u.auto_schedule_opt_out"""
+
+
+def _serialize_employee(row: asyncpg.Record) -> dict:
+    availability = row["weekly_availability"]
+    if isinstance(availability, str):
+        availability = json.loads(availability)
+    return {
+        "id": row["id"], "name": row["name"], "email": row["email"], "active": row["active"], "role": row["role"],
+        "departmentId": row["department_id"], "departmentName": row["department_name"],
+        "weeklyAvailability": availability or {},
+        "maxHoursPerWeek": float(row["max_hours_per_week"]), "minHoursPerWeek": float(row["min_hours_per_week"]),
+        "preferredHoursPerWeek": float(row["preferred_hours_per_week"]) if row["preferred_hours_per_week"] is not None else None,
+        "schedulingConfidence": row["scheduling_confidence"], "schedulingNotes": row["scheduling_notes"],
+        "autoScheduleOptOut": row["auto_schedule_opt_out"],
+    }
+
+
 @router.get("/api/scheduling/employees")
 async def scheduling_employees(departmentId: Optional[int] = None, user: dict = Depends(require_user)):
     if user["role"] != "manager":
@@ -126,28 +148,45 @@ async def scheduling_employees(departmentId: Optional[int] = None, user: dict = 
     if departmentId is not None:
         args.append(departmentId); conditions.append(f"u.department_id = ${len(args)}")
     rows = await db.pool.fetch(
-        f"""SELECT u.id, u.name, r.name AS role, u.department_id, d.name AS department_name, u.weekly_availability,
-                  u.max_hours_per_week, u.min_hours_per_week, u.preferred_hours_per_week,
-                  u.scheduling_confidence, u.scheduling_notes, u.auto_schedule_opt_out
+        f"""SELECT {_EMPLOYEE_COLUMNS}
             FROM users u JOIN roles r ON r.id = u.role_id
             LEFT JOIN departments d ON d.id = u.department_id
-            WHERE {' AND '.join(conditions)} ORDER BY u.name""", *args,
+            WHERE {' AND '.join(conditions)} ORDER BY u.active DESC, u.name""", *args,
     )
-    result = []
-    for row in rows:
-        availability = row["weekly_availability"]
-        if isinstance(availability, str):
-            availability = json.loads(availability)
-        result.append({
-            "id": row["id"], "name": row["name"], "role": row["role"],
-            "departmentId": row["department_id"], "departmentName": row["department_name"],
-            "weeklyAvailability": availability or {},
-            "maxHoursPerWeek": float(row["max_hours_per_week"]), "minHoursPerWeek": float(row["min_hours_per_week"]),
-            "preferredHoursPerWeek": float(row["preferred_hours_per_week"]) if row["preferred_hours_per_week"] is not None else None,
-            "schedulingConfidence": row["scheduling_confidence"], "schedulingNotes": row["scheduling_notes"],
-            "autoScheduleOptOut": row["auto_schedule_opt_out"],
-        })
-    return result
+    return [_serialize_employee(row) for row in rows]
+
+
+@router.post("/api/scheduling/employees")
+async def create_employee(payload: EmployeeCreateRequest, user: dict = Depends(require_user)):
+    if user["role"] != "manager":
+        raise HTTPException(403, detail="Only managers can add employees")
+    if payload.roleCategory not in ("foh", "boh"):
+        raise HTTPException(422, detail="roleCategory must be foh or boh")
+    name, email = payload.name.strip(), payload.email.strip()
+    if not name or not email or "@" not in email:
+        raise HTTPException(422, detail="A valid name and email are required")
+    restaurant_id = await _restaurant_id_for(user["id"])
+    if payload.departmentId is not None:
+        department = await db.pool.fetchrow("SELECT id FROM departments WHERE id = $1 AND resto_id = $2", payload.departmentId, restaurant_id)
+        if not department:
+            raise HTTPException(404, detail="Department not found")
+    if await db.pool.fetchval("SELECT 1 FROM users WHERE email = $1", email):
+        raise HTTPException(409, detail="Email already in use")
+    role_id = await db.pool.fetchval("SELECT id FROM roles WHERE name = $1", payload.roleCategory)
+    row = await db.pool.fetchrow(
+        f"""WITH new_user AS (
+                INSERT INTO users (restaurant_id, role_id, department_id, name, email, password_hash)
+                VALUES ($1, $2, $3, $4, $5, NULL)
+                RETURNING id, name, email, active, department_id, weekly_availability, max_hours_per_week,
+                          min_hours_per_week, preferred_hours_per_week, scheduling_confidence, scheduling_notes,
+                          auto_schedule_opt_out
+            )
+            SELECT new_user.*, r.name AS role, d.name AS department_name
+            FROM new_user JOIN roles r ON r.id = $2
+            LEFT JOIN departments d ON d.id = new_user.department_id""",
+        restaurant_id, role_id, payload.departmentId, name, email,
+    )
+    return _serialize_employee(row)
 
 
 @router.patch("/api/scheduling/employees/{employee_id}")
@@ -171,10 +210,11 @@ async def update_employee_profile(employee_id: int, payload: EmployeeProfileUpda
     await db.pool.execute(
         """UPDATE users SET department_id = COALESCE($1, department_id), max_hours_per_week = $2, min_hours_per_week = $3,
            preferred_hours_per_week = $4, scheduling_confidence = COALESCE($5, scheduling_confidence),
-           scheduling_notes = COALESCE($6, scheduling_notes), auto_schedule_opt_out = COALESCE($7, auto_schedule_opt_out)
-           WHERE id = $8""",
+           scheduling_notes = COALESCE($6, scheduling_notes), auto_schedule_opt_out = COALESCE($7, auto_schedule_opt_out),
+           active = COALESCE($8, active)
+           WHERE id = $9""",
         payload.departmentId, max_hours, min_hours, payload.preferredHoursPerWeek, payload.schedulingConfidence,
-        payload.schedulingNotes, payload.autoScheduleOptOut, employee_id,
+        payload.schedulingNotes, payload.autoScheduleOptOut, payload.active, employee_id,
     )
     return {"id": employee_id, "updated": True}
 
@@ -327,7 +367,7 @@ async def auto_build_schedule(payload: AutoBuildRequest, user: dict = Depends(re
             for shift in open_shifts:
                 candidates = await connection.fetch(
                     """SELECT u.id, u.scheduling_confidence, u.min_hours_per_week FROM users u JOIN roles r ON r.id = u.role_id
-                       WHERE u.restaurant_id = $1 AND r.name = $2 AND u.department_id = $3 AND u.auto_schedule_opt_out = false""",
+                       WHERE u.restaurant_id = $1 AND r.name = $2 AND u.department_id = $3 AND u.auto_schedule_opt_out = false AND u.active = true""",
                     restaurant_id, shift["role_required"], shift["department_id"],
                 )
                 # Busy blocks can declare a min_confidence (set explicitly by a manager on the
@@ -503,7 +543,7 @@ async def drop_shift(shiftId: int, user: dict = Depends(require_user)):
     if shift["status"] == "Pending_Swap":
         raise HTTPException(409, detail="This shift is already in the swap queue")
     candidates = await db.pool.fetch(
-        "SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id WHERE u.restaurant_id = $1 AND r.name = $2 AND u.department_id = $3 AND u.id <> $4",
+        "SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id WHERE u.restaurant_id = $1 AND r.name = $2 AND u.department_id = $3 AND u.id <> $4 AND u.active = true",
         restaurant_id, shift["role_required"], shift["department_id"], user["id"],
     )
     eligible = []

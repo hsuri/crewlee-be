@@ -31,7 +31,8 @@ async def seed_demo_data(pool: asyncpg.Pool) -> None:
         return
 
     restaurant_id = await pool.fetchval(
-        "INSERT INTO restaurants (name) VALUES ($1) RETURNING id", "Demo Restaurant"
+        "INSERT INTO restaurants (name, slug) VALUES ($1, $2) RETURNING id",
+        "Demo Restaurant", "demo-restaurant",
     )
     foh_dept = await pool.fetchval(
         "INSERT INTO departments (resto_id, name, role_category) VALUES ($1, 'Front of House', 'foh') RETURNING id",
