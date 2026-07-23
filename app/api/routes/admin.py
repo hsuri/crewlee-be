@@ -30,8 +30,6 @@ async def create_restaurant(payload: RestaurantCreateRequest):
 
     if await db.pool.fetchval("SELECT 1 FROM restaurants WHERE slug = $1", slug):
         raise HTTPException(status_code=409, detail="Slug already in use")
-    if await db.pool.fetchval("SELECT 1 FROM users WHERE email = $1", manager_email):
-        raise HTTPException(status_code=409, detail="Email already in use")
 
     async with db.pool.acquire() as connection:
         async with connection.transaction():

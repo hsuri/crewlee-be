@@ -170,8 +170,8 @@ async def create_employee(payload: EmployeeCreateRequest, user: dict = Depends(r
         department = await db.pool.fetchrow("SELECT id FROM departments WHERE id = $1 AND resto_id = $2", payload.departmentId, restaurant_id)
         if not department:
             raise HTTPException(404, detail="Department not found")
-    if await db.pool.fetchval("SELECT 1 FROM users WHERE email = $1", email):
-        raise HTTPException(409, detail="Email already in use")
+    if await db.pool.fetchval("SELECT 1 FROM users WHERE email = $1 AND restaurant_id = $2", email, restaurant_id):
+        raise HTTPException(409, detail="Email already in use at this restaurant")
     role_id = await db.pool.fetchval("SELECT id FROM roles WHERE name = $1", payload.roleCategory)
     row = await db.pool.fetchrow(
         f"""WITH new_user AS (
