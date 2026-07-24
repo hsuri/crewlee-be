@@ -15,16 +15,12 @@ async def user_login(creds: UserLoginRequest):
 
     # Email is scoped per-restaurant (not globally unique), so the same email can match
     # more than one row here -- e.g. the same person with accounts at two restaurants.
-    # Try the supplied password against every active, claimed row. Usually it disambiguates
-    # on its own (different password per job -> exactly one match, no picker needed). If the
-    # person reuses the same password at both places, more than one row matches -- see below.
+    # Try the supplied password against every active, claimed row and log into whichever
+    # one it matches; this needs no "which restaurant?" UI since the password disambiguates.
     rows = await db.pool.fetch(
         """
-        SELECT users.id, users.name, users.email, users.password_hash, users.active, roles.name AS role,
-               restaurants.id AS restaurant_id, restaurants.name AS restaurant_name
-        FROM users
-        JOIN roles ON roles.id = users.role_id
-        JOIN restaurants ON restaurants.id = users.restaurant_id
+        SELECT users.id, users.name, users.email, users.password_hash, users.active, roles.name AS role
+        FROM users JOIN roles ON roles.id = users.role_id
         WHERE users.email = $1
         """,
         creds.email,
@@ -39,52 +35,17 @@ async def user_login(creds: UserLoginRequest):
             content={"detail": "This account has been deactivated. Contact your manager.", "deactivated": True},
         )
 
-    def _account(row, other_restaurants=None):
-        user = {
-            "id": row["id"],
-            "name": row["name"],
-            "email": row["email"],
-            "role": row["role"],
-            "restaurantId": row["restaurant_id"],
-            "restaurantName": row["restaurant_name"],
-        }
-        if other_restaurants:
-            user["otherRestaurants"] = other_restaurants
-        return {"token": make_token(row["id"]), "user": user}
+    for row in active_rows:
+        if row["password_hash"] is not None and verify_password(creds.password, row["password_hash"]):
+            return {
+                "token": make_token(row["id"]),
+                "user": {"id": row["id"], "name": row["name"], "email": row["email"], "role": row["role"]},
+            }
 
-    matches = [
-        row for row in active_rows
-        if row["password_hash"] is not None and verify_password(creds.password, row["password_hash"])
-    ]
-    if len(matches) == 1:
-        # Different password per restaurant already disambiguates fine (no picker needed), but
-        # surface any other restaurant(s) this email has a row at -- purely informational, since
-        # we have no valid token for a row we didn't just verify the password against. `status`
-        # distinguishes "log in there" (already claimed, different password) from "sign up
-        # there" (invited but no password set yet) so the hint doesn't tell someone to log in
-        # somewhere they can't yet.
-        others = [
-            {"name": r["restaurant_name"], "status": "pending" if r["password_hash"] is None else "active"}
-            for r in active_rows if r["id"] != matches[0]["id"]
-        ]
-        return _account(matches[0], others)
-    if len(matches) > 1:
-        # Same password matches more than one restaurant account for this email -- picking one
-        # arbitrarily would silently log them into the wrong restaurant. The password already
-        # proved who they are for every matching row, so hand back a real, usable token for
-        # each one and let the frontend show a "which restaurant?" picker instead of guessing.
-        return {"accounts": [_account(row) for row in matches]}
-
-    pending_rows = [r for r in active_rows if r["password_hash"] is None]
-    if pending_rows:
+    if any(row["password_hash"] is None for row in active_rows):
         return JSONResponse(
             status_code=403,
-            content={
-                "detail": "Choose a password to finish setting up your account.",
-                "pending": True,
-                # Only name it when unambiguous -- see invite_status's identical rule below.
-                "restaurantName": pending_rows[0]["restaurant_name"] if len(pending_rows) == 1 else None,
-            },
+            content={"detail": "Choose a password to finish setting up your account.", "pending": True},
         )
 
     raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -100,11 +61,8 @@ async def set_password(payload: SetPasswordRequest):
     # exact same email, the other one stays pending with no way to disambiguate here.)
     rows = await db.pool.fetch(
         """
-        SELECT users.id, users.name, users.email, users.password_hash, users.active, roles.name AS role,
-               restaurants.id AS restaurant_id, restaurants.name AS restaurant_name
-        FROM users
-        JOIN roles ON roles.id = users.role_id
-        JOIN restaurants ON restaurants.id = users.restaurant_id
+        SELECT users.id, users.name, users.email, users.password_hash, users.active, roles.name AS role
+        FROM users JOIN roles ON roles.id = users.role_id
         WHERE users.email = $1
         ORDER BY users.id
         """,
@@ -126,14 +84,7 @@ async def set_password(payload: SetPasswordRequest):
     )
     return {
         "token": make_token(row["id"]),
-        "user": {
-            "id": row["id"],
-            "name": row["name"],
-            "email": row["email"],
-            "role": row["role"],
-            "restaurantId": row["restaurant_id"],
-            "restaurantName": row["restaurant_name"],
-        },
+        "user": {"id": row["id"], "name": row["name"], "email": row["email"], "role": row["role"]},
     }
 
 
@@ -146,22 +97,12 @@ async def invite_status(email: str):
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     rows = await db.pool.fetch(
-        """
-        SELECT users.password_hash, users.active, restaurants.name AS restaurant_name
-        FROM users JOIN restaurants ON restaurants.id = users.restaurant_id
-        WHERE users.email = $1
-        """,
-        email,
+        "SELECT password_hash, active FROM users WHERE email = $1", email
     )
     if not rows:
         return {"status": "not_found"}
-    pending = [r for r in rows if r["password_hash"] is None and r["active"]]
-    if pending:
-        # Only name the restaurant when there's exactly one pending invite to claim -- with two
-        # simultaneous pending invites for the same email (the known ambiguous-signup edge case),
-        # set_password always resolves to the oldest one anyway, so naming a specific restaurant
-        # here would be a guess dressed up as a fact.
-        return {"status": "pending", "restaurantName": pending[0]["restaurant_name"] if len(pending) == 1 else None}
+    if any(r["password_hash"] is None and r["active"] for r in rows):
+        return {"status": "pending"}
     return {"status": "active"}
 
 
