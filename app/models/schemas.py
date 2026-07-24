@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class WaitlistEntry(BaseModel):
@@ -18,10 +18,23 @@ class UserLoginRequest(BaseModel):
     email: str
     password: str
 
+    # Emails are matched case-insensitively everywhere (see auth.py) -- normalizing here too
+    # means every downstream use of payload.email (queries, stored values) already agrees,
+    # rather than each call site remembering to re-lowercase it.
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
+
 
 class SetPasswordRequest(BaseModel):
     email: str
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class RestaurantCreateRequest(BaseModel):
@@ -30,12 +43,22 @@ class RestaurantCreateRequest(BaseModel):
     managerName: str
     managerEmail: str
 
+    @field_validator("managerEmail")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
+
 
 class EmployeeCreateRequest(BaseModel):
     name: str
     email: str
     roleCategory: str
     departmentId: Optional[int] = None
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
 
 
 class AutoBuildRequest(BaseModel):

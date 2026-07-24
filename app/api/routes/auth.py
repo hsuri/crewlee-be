@@ -17,11 +17,13 @@ async def user_login(creds: UserLoginRequest):
     # more than one row here -- e.g. the same person with accounts at two restaurants.
     # Try the supplied password against every active, claimed row and log into whichever
     # one it matches; this needs no "which restaurant?" UI since the password disambiguates.
+    # creds.email is already lowercased by UserLoginRequest's validator; LOWER() on the column
+    # side matches it against any already-stored row regardless of the case it was saved in.
     rows = await db.pool.fetch(
         """
         SELECT users.id, users.name, users.email, users.password_hash, users.active, roles.name AS role
         FROM users JOIN roles ON roles.id = users.role_id
-        WHERE users.email = $1
+        WHERE LOWER(users.email) = $1
         """,
         creds.email,
     )
@@ -63,7 +65,7 @@ async def set_password(payload: SetPasswordRequest):
         """
         SELECT users.id, users.name, users.email, users.password_hash, users.active, roles.name AS role
         FROM users JOIN roles ON roles.id = users.role_id
-        WHERE users.email = $1
+        WHERE LOWER(users.email) = $1
         ORDER BY users.id
         """,
         payload.email,
@@ -96,8 +98,10 @@ async def invite_status(email: str):
     if not db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+    # Not a Pydantic model field (this is a query param), so normalize by hand here.
+    email = email.strip().lower()
     rows = await db.pool.fetch(
-        "SELECT password_hash, active FROM users WHERE email = $1", email
+        "SELECT password_hash, active FROM users WHERE LOWER(email) = $1", email
     )
     if not rows:
         return {"status": "not_found"}
