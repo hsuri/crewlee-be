@@ -17,6 +17,13 @@ RAG_GENERATION_MODEL = "claude-sonnet-5"
 RAG_CHUNK_MAX_CHARS = 1500
 RAG_TOP_K = 8
 
+# Guest AI: same retrieval/generation knobs as the employee assistant, but its own top-k
+# (kept equal today, split out because guest grounding is more conservative and may want a
+# different k later) and a per-IP rate limit for the public, unauthenticated endpoint.
+GUEST_RAG_TOP_K = 8
+GUEST_RATE_LIMIT_MAX_REQUESTS = 20
+GUEST_RATE_LIMIT_WINDOW_SECONDS = 300
+
 DB_FIELDS = [
     {"name": "name",       "label": "Your Name",       "type": "text",   "required": True},
     {"name": "email",      "label": "Email",           "type": "email",  "required": True},

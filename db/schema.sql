@@ -178,6 +178,12 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- chunks in place rather than keeping prior revisions. `content` is text extracted at
 -- upload time from the original PDF/DOCX/pasted-text-as-.txt (app/services/rag.py's
 -- extract_text) -- the original file itself lives in GCS at `gcs_path`, not in Postgres.
+-- is_guest_visible is a hard, enforced security boundary (unlike `visibility` above): the
+-- public Guest AI endpoint's retrieval query filters on it directly, so a document only ever
+-- reaches an unauthenticated guest if a manager has explicitly flagged it. Defaults to false
+-- so every existing/new document is internal-only until a manager opts it in. Orthogonal to
+-- `visibility` (which is about internal role tiers, unenforced) rather than layered onto it,
+-- since "guest" isn't another rung on the owner/manager/employee ladder.
 CREATE TABLE IF NOT EXISTS rag_documents (
     id                SERIAL PRIMARY KEY,
     resto_id          integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
@@ -185,6 +191,7 @@ CREATE TABLE IF NOT EXISTS rag_documents (
     title             text NOT NULL,
     doc_type          text NOT NULL DEFAULT 'other' CHECK (doc_type IN ('recipe', 'sop', 'training', 'license', 'other')),
     visibility        text NOT NULL DEFAULT 'employee' CHECK (visibility IN ('owner', 'manager', 'employee')),
+    is_guest_visible  boolean NOT NULL DEFAULT false,
     content           text NOT NULL,
     original_filename text NOT NULL,
     file_type         text NOT NULL CHECK (file_type IN ('pdf', 'docx', 'txt')),
@@ -195,7 +202,17 @@ CREATE TABLE IF NOT EXISTS rag_documents (
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
+-- schema.sql only ever CREATEs (see file header / CLAUDE.md) so this column would silently
+-- never reach a database that already has rag_documents (any deployed environment, including
+-- Baton Rouge's). ADD COLUMN IF NOT EXISTS is idempotent like everything else here, so it's
+-- safe to run on every boot alongside the CREATE TABLE above -- this is the one exception to
+-- "only CREATE", made deliberately because the alternative (Alembic) isn't wired into any
+-- deploy path yet. See alembic/versions/*_guest_ai.py, which carries the same statement for
+-- when that changes, and crewlee-be/CLAUDE.md's Known limitations for the full explanation.
+ALTER TABLE rag_documents ADD COLUMN IF NOT EXISTS is_guest_visible boolean NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS rag_documents_resto_idx ON rag_documents (resto_id);
+CREATE INDEX IF NOT EXISTS rag_documents_guest_visible_idx ON rag_documents (resto_id, is_guest_visible) WHERE is_guest_visible;
 
 -- One row per chunk of a document's content, embedded independently for retrieval.
 -- resto_id is denormalized from rag_documents so a query can filter/index on it directly
@@ -214,3 +231,30 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
 CREATE INDEX IF NOT EXISTS rag_chunks_document_idx ON rag_chunks (document_id);
 CREATE INDEX IF NOT EXISTS rag_chunks_resto_idx ON rag_chunks (resto_id);
 CREATE INDEX IF NOT EXISTS rag_chunks_embedding_idx ON rag_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- One row per restaurant, created on first access to the Guest AI settings endpoint (see
+-- app/api/routes/guest_ai.py's _get_or_create_settings) rather than at restaurant-creation
+-- time, so a restaurant that never touches Guest AI never gets a row. `enabled` gates the
+-- public endpoint entirely -- a disabled restaurant's guest chat 404s rather than answering
+-- from an empty/stale knowledge set.
+CREATE TABLE IF NOT EXISTS guest_ai_settings (
+    resto_id   integer PRIMARY KEY REFERENCES restaurants(id) ON DELETE CASCADE,
+    enabled    boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Lightweight usage log for the manager-facing "Questions today/this week" metrics --
+-- deliberately holds no guest identity (no IP, no session id, no cookie): a guest is never
+-- identifiable across questions or across visits. `answered` is false when retrieval found
+-- nothing guest-visible to ground an answer in (see rag.answer_guest_question's
+-- has_enough_info), which is what powers the "unanswered questions" metric.
+CREATE TABLE IF NOT EXISTS guest_ai_queries (
+    id         SERIAL PRIMARY KEY,
+    resto_id   integer NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+    question   text NOT NULL,
+    answered   boolean NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS guest_ai_queries_resto_created_idx ON guest_ai_queries (resto_id, created_at DESC);

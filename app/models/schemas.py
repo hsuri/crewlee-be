@@ -142,6 +142,18 @@ class RagQueryRequest(BaseModel):
     question: str
 
 
+class GuestQueryRequest(BaseModel):
+    question: str
+
+
+class GuestAiSettingsUpdateRequest(BaseModel):
+    enabled: bool
+
+
+class GuestKnowledgeVisibilityUpdateRequest(BaseModel):
+    isGuestVisible: bool
+
+
 class EmployeeProfileUpdateRequest(BaseModel):
     departmentId: Optional[int] = None
     maxHoursPerWeek: Optional[float] = None
